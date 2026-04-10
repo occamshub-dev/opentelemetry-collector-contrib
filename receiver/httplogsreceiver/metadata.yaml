@@ -1,0 +1,17 @@
+display_name: HTTP Logs Receiver
+type: httplogs
+
+description: |
+  The HTTP Logs Receiver is for ingesting HTTP logs and parsing the records received
+  based on the configured record type.
+
+status:
+  class: receiver
+  stability:
+    alpha: [metrics, logs]
+  distributions: [contrib]
+  codeowners:
+    active: [piffall]
+
+tests:
+  config:
