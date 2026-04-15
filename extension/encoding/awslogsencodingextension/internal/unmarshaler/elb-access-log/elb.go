@@ -280,7 +280,7 @@ func convertTextToALBAccessLogRecord(fields []string) (ALBAccessLogRecord, error
 	var err error
 	fieldsCount := len(fields)
 	if fieldsCount < 29 {
-		return ALBAccessLogRecord{}, fmt.Errorf("alb access logs do not have enough fields. Expected 29, got %d", fieldsCount)
+		return ALBAccessLogRecord{}, fmt.Errorf("alb access logs do not have enough fields. Expected 29, got %d (%v)", fieldsCount, strings.Join(fields, " "))
 	}
 	// Map fields to the struct
 	record := ALBAccessLogRecord{

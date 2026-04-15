@@ -140,14 +140,6 @@ func (fmr *firehoseReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	requestID := r.Header.Get(headerFirehoseRequestID)
-	if requestID == "" {
-		fmr.settings.Logger.Error(
-			"Invalid Firehose request",
-			zap.Error(errInHeaderMissingRequestID),
-		)
-		fmr.sendResponse(w, requestID, http.StatusBadRequest, errInHeaderMissingRequestID)
-		return
-	}
 	fmr.settings.Logger.Debug("Processing Firehose request", zap.String("RequestID", requestID))
 
 	if statusCode, err := fmr.validate(r); err != nil {
@@ -183,6 +175,7 @@ func (fmr *firehoseReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		fmr.settings.Logger.Error(
 			"Unable to consume records",
+			zap.String("RequestID", requestID),
 			zap.Error(err),
 		)
 		fmr.sendResponse(w, requestID, statusCode, err)
