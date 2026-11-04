@@ -21,7 +21,7 @@ import (
 
 const defaultLogsEncoding = cwlog.TypeStr
 
-// logsConsumer implements the firehoseConsumer
+// logsConsumer implements the httpLogsConsumer
 // to use a logs consumer and unmarshaler.
 type logsConsumer struct {
 	config   *Config
@@ -35,7 +35,7 @@ type logsConsumer struct {
 	unmarshaler plog.Unmarshaler
 }
 
-var _ firehoseConsumer = (*logsConsumer)(nil)
+var _ httpLogsConsumer = (*logsConsumer)(nil)
 
 // newLogsReceiver creates a new instance of the receiver
 // with a logsConsumer.
@@ -49,7 +49,7 @@ func newLogsReceiver(
 		settings: set,
 		consumer: nextConsumer,
 	}
-	return &firehoseReceiver{
+	return &httpLogsReceiver{
 		settings: set,
 		config:   config,
 		consumer: c,

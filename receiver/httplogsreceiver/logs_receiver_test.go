@@ -87,7 +87,7 @@ func TestLogsReceiver_Start(t *testing.T) {
 			)
 			require.NoError(t, err)
 			require.NotNil(t, got)
-			require.IsType(t, &firehoseReceiver{}, got)
+			require.IsType(t, &httpLogsReceiver{}, got)
 			t.Cleanup(func() {
 				require.NoError(t, got.Shutdown(t.Context()))
 			})
@@ -109,7 +109,7 @@ func TestLogsReceiver_Start(t *testing.T) {
 
 			assert.IsType(t,
 				testCase.wantUnmarshalerType,
-				got.(*firehoseReceiver).consumer.(*logsConsumer).unmarshaler,
+				got.(*httpLogsReceiver).consumer.(*logsConsumer).unmarshaler,
 			)
 		})
 	}

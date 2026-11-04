@@ -23,7 +23,7 @@ import (
 
 const defaultMetricsEncoding = cwmetricstream.TypeStr
 
-// The metricsConsumer implements the firehoseConsumer
+// The metricsConsumer implements the httpLogsConsumer
 // to use a metrics consumer and unmarshaler.
 type metricsConsumer struct {
 	config   *Config
@@ -36,7 +36,7 @@ type metricsConsumer struct {
 	unmarshaler pmetric.Unmarshaler
 }
 
-var _ firehoseConsumer = (*metricsConsumer)(nil)
+var _ httpLogsConsumer = (*metricsConsumer)(nil)
 
 // newMetricsReceiver creates a new instance of the receiver
 // with a metricsConsumer.
@@ -50,7 +50,7 @@ func newMetricsReceiver(
 		settings: set,
 		consumer: nextConsumer,
 	}
-	return &firehoseReceiver{
+	return &httpLogsReceiver{
 		settings: set,
 		config:   config,
 		consumer: c,

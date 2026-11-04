@@ -120,7 +120,7 @@ func TestUnmarshalLargePayload(t *testing.T) {
 	var largePayload bytes.Buffer
 	largePayload.WriteString(`{"messageType":"DATA_MESSAGE","owner":"123","logGroup":"test","logStream":"test","logEvents":[`)
 	largePayload.WriteString(`{"timestamp":1742239784,"message":"`)
-	for largePayload.Len() < 5*1024*1024 { // default firehose stream buffer size is 5MB
+	for largePayload.Len() < 5*1024*1024 { // default stream buffer size is 5MB
 		largePayload.WriteString("a")
 	}
 	largePayload.WriteString(`"}]}`)

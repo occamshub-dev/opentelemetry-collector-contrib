@@ -37,9 +37,6 @@ extensions:
 The configuration includes the OpenTelemetry collector's server [confighttp](https://github.com/open-telemetry/opentelemetry-collector/tree/main/config/confighttp#server-configuration),
 which allows for a variety of settings. Only the most relevant ones will be discussed here, but all are available.
 
-The Amazon Data Firehose Delivery Streams currently only support HTTPS endpoints using port 443.
-This can be potentially circumvented using a Load Balancer.
-
 ### endpoint:
 The address:port to bind the listener to.
 
@@ -64,9 +61,8 @@ In the future, the default encodings will be removed, and it will be required to
 
 Deprecated, use `encoding` instead. `record_type` will be removed in a future release; it is an alias for `encoding`.
 
-### access\_key (Optional):
+### access\_key (Required):
 The access key to be checked on each request received. This can be set when creating or updating the delivery stream.
-See [documentation](https://docs.aws.amazon.com/firehose/latest/dev/create-destination.html#create-destination-http) for details.
 
 ## Encodings
 

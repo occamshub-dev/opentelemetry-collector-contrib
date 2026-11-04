@@ -28,36 +28,36 @@ import (
 )
 
 const (
-	testFirehoseRequestID = "firehose-request-id"
-	testFirehoseAccessKey = "firehose-access-key"
+	testHttpRequestID = "request-id"
+	testHttpAccessKey = "access-key"
 )
 
-type nopFirehoseConsumer struct {
+type nopHttpLogsConsumer struct {
 	statusCode int
 	err        error
 }
 
-var _ firehoseConsumer = (*nopFirehoseConsumer)(nil)
+var _ = (*nopHttpLogsConsumer)(nil)
 
-func newNopFirehoseConsumer(statusCode int, err error) *nopFirehoseConsumer {
-	return &nopFirehoseConsumer{statusCode, err}
+func newNopHttpLogsConsumer(statusCode int, err error) *nopHttpLogsConsumer {
+	return &nopHttpLogsConsumer{statusCode, err}
 }
 
-func (*nopFirehoseConsumer) Start(context.Context, component.Host) error {
+func (*nopHttpLogsConsumer) Start(context.Context, component.Host) error {
 	return nil
 }
 
-func (nfc *nopFirehoseConsumer) Consume(context.Context, nextRecordFunc, map[string]string) (int, error) {
+func (nfc *nopHttpLogsConsumer) Consume(context.Context, nextRecordFunc, map[string]string) (int, error) {
 	return nfc.statusCode, nfc.err
 }
 
-type firehoseConsumerFunc func(context.Context, nextRecordFunc, map[string]string) (int, error)
+type httpLogsConsumerFunc func(context.Context, nextRecordFunc, map[string]string) (int, error)
 
-func (firehoseConsumerFunc) Start(context.Context, component.Host) error {
+func (httpLogsConsumerFunc) Start(context.Context, component.Host) error {
 	return nil
 }
 
-func (f firehoseConsumerFunc) Consume(ctx context.Context, next nextRecordFunc, common map[string]string) (int, error) {
+func (f httpLogsConsumerFunc) Consume(ctx context.Context, next nextRecordFunc, common map[string]string) (int, error) {
 	return f(ctx, next, common)
 }
 
@@ -80,7 +80,7 @@ func TestStart(t *testing.T) {
 				},
 			}
 			ctx := t.Context()
-			r := testFirehoseReceiver(cfg, &nopFirehoseConsumer{})
+			r := testHttpReceiver(cfg, &nopHttpLogsConsumer{})
 			got := r.Start(ctx, testCase.host)
 			require.Equal(t, testCase.wantErr, got)
 			if r.server != nil {
@@ -103,7 +103,7 @@ func TestStart(t *testing.T) {
 			},
 		}
 		ctx := t.Context()
-		r := testFirehoseReceiver(cfg, &nopFirehoseConsumer{})
+		r := testHttpReceiver(cfg, &nopHttpLogsConsumer{})
 		got := r.Start(ctx, componenttest.NewNopHost())
 		require.Error(t, got)
 		if r.server != nil {
@@ -112,61 +112,60 @@ func TestStart(t *testing.T) {
 	})
 }
 
-func TestFirehoseRequest(t *testing.T) {
-	defaultConsumer := newNopFirehoseConsumer(http.StatusOK, nil)
-	firehoseConsumerErr := errors.New("firehose consumer error")
+func TestRequest(t *testing.T) {
+	defaultConsumer := newNopHttpLogsConsumer(http.StatusOK, nil)
+	httpLogsConsumerErr := errors.New("consumer error")
 	cfg := &Config{
-		AccessKey: testFirehoseAccessKey,
+		AccessKey: testHttpAccessKey,
 	}
 	noRecords := ""
 	testCases := map[string]struct {
 		headers          map[string]string
 		commonAttributes map[string]string
 		body             any
-		consumer         firehoseConsumer
+		consumer         httpLogsConsumer
 		wantStatusCode   int
 		wantErr          error
 	}{
 		"WithoutRequestId/Header": {
 			headers: map[string]string{
-				headerFirehoseRequestID: "",
+				headerHttpRequestID: "",
 			},
-			body:           testFirehoseRequest(testFirehoseRequestID, noRecords),
-			wantStatusCode: http.StatusBadRequest,
-			wantErr:        errInHeaderMissingRequestID,
+			body:           testHttpRequest(testHttpRequestID, noRecords),
+			wantStatusCode: http.StatusOK,
 		},
 		"WithDifferentAccessKey": {
 			headers: map[string]string{
-				headerFirehoseAccessKey: "test",
+				headerHttpAccessKey: "test",
 			},
-			body:           testFirehoseRequest(testFirehoseRequestID, noRecords),
+			body:           testHttpRequest(testHttpRequestID, noRecords),
 			wantStatusCode: http.StatusUnauthorized,
 			wantErr:        errInvalidAccessKey,
 		},
 		"WithNoAccessKey": {
 			headers: map[string]string{
-				headerFirehoseAccessKey: "",
+				headerHttpAccessKey: "",
 			},
-			body:           testFirehoseRequest(testFirehoseRequestID, noRecords),
+			body:           testHttpRequest(testHttpRequestID, noRecords),
 			wantStatusCode: http.StatusUnauthorized,
 			wantErr:        errInvalidAccessKey,
 		},
 		"WithNoRecords": {
-			body:           testFirehoseRequest(testFirehoseRequestID, noRecords),
+			body:           testHttpRequest(testHttpRequestID, noRecords),
 			wantStatusCode: http.StatusOK,
 		},
-		"WithFirehoseConsumerError": {
-			body:           testFirehoseRequest(testFirehoseRequestID, noRecords),
-			consumer:       newNopFirehoseConsumer(http.StatusInternalServerError, firehoseConsumerErr),
+		"WithHttpLogsConsumerError": {
+			body:           testHttpRequest(testHttpRequestID, noRecords),
+			consumer:       newNopHttpLogsConsumer(http.StatusInternalServerError, httpLogsConsumerErr),
 			wantStatusCode: http.StatusInternalServerError,
-			wantErr:        firehoseConsumerErr,
+			wantErr:        httpLogsConsumerErr,
 		},
 		"WithValidRecords": {
-			body:           testFirehoseRequest(testFirehoseRequestID, "test"),
+			body:           testHttpRequest(testHttpRequestID, "test"),
 			wantStatusCode: http.StatusOK,
 		},
 		"WithValidRecords/CommonAttributes": {
-			body: testFirehoseRequest(testFirehoseRequestID, "test"),
+			body: testHttpRequest(testHttpRequestID, "test"),
 			commonAttributes: map[string]string{
 				"TestAttribute": "common",
 			},
@@ -185,26 +184,26 @@ func TestFirehoseRequest(t *testing.T) {
 				}
 			}
 			if testCase.commonAttributes != nil {
-				attrs, err := json.Marshal(firehoseCommonAttributes{
+				attrs, err := json.Marshal(httpLogsCommonAttributes{
 					CommonAttributes: testCase.commonAttributes,
 				})
 				require.NoError(t, err)
-				request.Header.Set(headerFirehoseCommonAttributes, string(attrs))
+				request.Header.Set(headerHttpCommonAttributes, string(attrs))
 			}
 
 			consumer := testCase.consumer
 			if consumer == nil {
 				consumer = defaultConsumer
 			}
-			r := testFirehoseReceiver(cfg, consumer)
+			r := testHttpReceiver(cfg, consumer)
 
 			got := httptest.NewRecorder()
 			r.ServeHTTP(got, request)
 
 			require.Equal(t, testCase.wantStatusCode, got.Code)
-			var gotResponse firehoseResponse
+			var gotResponse httpLogsResponse
 			require.NoError(t, json.Unmarshal(got.Body.Bytes(), &gotResponse))
-			require.Equal(t, request.Header.Get(headerFirehoseRequestID), gotResponse.RequestID)
+			require.Equal(t, request.Header.Get(headerHttpRequestID), gotResponse.RequestID)
 			if testCase.wantErr != nil {
 				require.Equal(t, testCase.wantErr.Error(), gotResponse.ErrorMessage)
 			} else {
@@ -214,9 +213,9 @@ func TestFirehoseRequest(t *testing.T) {
 	}
 }
 
-// testFirehoseReceiver is a convenience function for creating a test firehoseReceiver
-func testFirehoseReceiver(config *Config, consumer firehoseConsumer) *firehoseReceiver {
-	return &firehoseReceiver{
+// testHttpReceiver is a convenience function for creating a test httpLogsReceiver
+func testHttpReceiver(config *Config, consumer httpLogsConsumer) *httpLogsReceiver {
+	return &httpLogsReceiver{
 		settings: receivertest.NewNopSettings(metadata.Type),
 		config:   config,
 		consumer: consumer,
@@ -227,16 +226,16 @@ func newTestRequest(requestBody []byte) *http.Request {
 	request := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(requestBody))
 	request.Header.Set(headerContentType, "application/json")
 	request.Header.Set(headerContentLength, strconv.Itoa(len(requestBody)))
-	request.Header.Set(headerFirehoseRequestID, testFirehoseRequestID)
-	request.Header.Set(headerFirehoseAccessKey, testFirehoseAccessKey)
+	request.Header.Set(headerHttpRequestID, testHttpRequestID)
+	request.Header.Set(headerHttpAccessKey, testHttpAccessKey)
 	return request
 }
 
-func testFirehoseRequest(requestID string, records string) string {
+func testHttpRequest(requestID, records string) string {
 	return records
 }
 
-func testFirehoseRecord(data string) string {
+func testHttpRecord(data string) string {
 	return data
 }
 

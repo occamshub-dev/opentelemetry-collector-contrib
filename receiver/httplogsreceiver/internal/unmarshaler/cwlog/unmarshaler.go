@@ -53,7 +53,6 @@ func NewUnmarshaler(logger *zap.Logger, buildInfo component.BuildInfo) *Unmarsha
 // UnmarshalLogs deserializes the given record as CloudWatch Logs events
 // into a plog.Logs, grouping logs by owner (account ID), log group, and
 // log stream. Logs are assumed to be gzip-compressed as specified at
-// https://docs.aws.amazon.com/firehose/latest/dev/writing-with-cloudwatch-logs.html.
 func (u *Unmarshaler) UnmarshalLogs(compressedRecord []byte) (plog.Logs, error) {
 	var err error
 	r, ok := u.gzipPool.Get().(*gzip.Reader)

@@ -23,22 +23,22 @@ import (
 )
 
 const (
-	headerFirehoseRequestID        = "X-Amz-Firehose-Request-Id"
-	headerFirehoseAccessKey        = "X-Amz-Firehose-Access-Key"
-	headerFirehoseCommonAttributes = "X-Amz-Firehose-Common-Attributes"
-	headerContentType              = "Content-Type"
-	headerContentLength            = "Content-Length"
+	headerHttpRequestID        = "X-Request-Id"
+	headerHttpAccessKey        = "X-Access-Key"
+	headerHttpCommonAttributes = "X-Common-Attributes"
+	headerContentType          = "Content-Type"
+	headerContentLength        = "Content-Length"
 )
 
 var (
-	errInvalidAccessKey         = errors.New("invalid firehose access key")
+	errInvalidAccessKey         = errors.New("invalid access key")
 	errInHeaderMissingRequestID = errors.New("missing request id in header")
 	errInBodyMissingRequestID   = errors.New("missing request id in body")
 	errInBodyDiffRequestID      = errors.New("different request id in body")
 )
 
-// The firehoseConsumer is responsible for using the unmarshaler and the consumer.
-type firehoseConsumer interface {
+// The httpLogsConsumer is responsible for using the unmarshaler and the consumer.
+type httpLogsConsumer interface {
 	Start(context.Context, component.Host) error
 
 	// Consume unmarshals and consumes the records returned by f.
@@ -50,8 +50,8 @@ type firehoseConsumer interface {
 // are no more records.
 type nextRecordFunc func() ([]byte, error)
 
-// firehoseReceiver
-type firehoseReceiver struct {
+// httpLogsReceiver
+type httpLogsReceiver struct {
 	// settings is the base receiver settings.
 	settings receiver.Settings
 	// config is the configuration for the receiver.
@@ -62,14 +62,14 @@ type firehoseReceiver struct {
 	// shutdownWG is the WaitGroup that is used to wait until
 	// the server shutdown has completed.
 	shutdownWG sync.WaitGroup
-	// consumer is the firehoseConsumer to use to process/send
+	// consumer is the httpLogsConsumer to use to process/send
 	// the records in each request.
-	consumer firehoseConsumer
+	consumer httpLogsConsumer
 }
 
-// The firehoseResponse is the expected body for the response back to
+// The httpLogsResponse is the expected body for the response back to
 // the delivery stream.
-type firehoseResponse struct {
+type httpLogsResponse struct {
 	// RequestID is the same GUID that was received in
 	// the request.
 	RequestID string `json:"requestId"`
@@ -81,23 +81,23 @@ type firehoseResponse struct {
 	ErrorMessage string `json:"errorMessage,omitempty"`
 }
 
-// The firehoseCommonAttributes is the format for the common attributes
+// The httpLogsCommonAttributes is the format for the common attributes
 // found in the header of requests.
-type firehoseCommonAttributes struct {
+type httpLogsCommonAttributes struct {
 	// CommonAttributes can be set when creating the delivery stream.
-	// These will be passed to the firehoseConsumer, which should
+	// These will be passed to the httpLogsConsumer, which should
 	// attach the attributes.
 	CommonAttributes map[string]string `json:"commonAttributes"`
 }
 
 var (
-	_ receiver.Metrics = (*firehoseReceiver)(nil)
-	_ http.Handler     = (*firehoseReceiver)(nil)
+	_ receiver.Metrics = (*httpLogsReceiver)(nil)
+	_ http.Handler     = (*httpLogsReceiver)(nil)
 )
 
 // Start spins up the receiver's HTTP server and makes the receiver start
 // its processing.
-func (fmr *firehoseReceiver) Start(ctx context.Context, host component.Host) error {
+func (fmr *httpLogsReceiver) Start(ctx context.Context, host component.Host) error {
 	if err := fmr.consumer.Start(ctx, host); err != nil {
 		return fmt.Errorf("failed to start consumer: %w", err)
 	}
@@ -125,7 +125,7 @@ func (fmr *firehoseReceiver) Start(ctx context.Context, host component.Host) err
 // Shutdown tells the receiver that should stop reception,
 // giving it a chance to perform any necessary clean-up and
 // shutting down its HTTP server.
-func (fmr *firehoseReceiver) Shutdown(context.Context) error {
+func (fmr *httpLogsReceiver) Shutdown(context.Context) error {
 	if fmr.server == nil {
 		return nil
 	}
@@ -134,17 +134,17 @@ func (fmr *firehoseReceiver) Shutdown(context.Context) error {
 	return err
 }
 
-// ServeHTTP receives Firehose requests, unmarshalls them, and sends them along to the firehoseConsumer,
+// ServeHTTP receives HTTP requests, unmarshalls them, and sends them along to the httpLogsConsumer,
 // which is responsible for unmarshalling the records and sending them to the next consumer.
-func (fmr *firehoseReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (fmr *httpLogsReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	requestID := r.Header.Get(headerFirehoseRequestID)
-	fmr.settings.Logger.Debug("Processing Firehose request", zap.String("RequestID", requestID))
+	requestID := r.Header.Get(headerHttpRequestID)
+	fmr.settings.Logger.Debug("Processing request", zap.String("RequestID", requestID))
 
 	if statusCode, err := fmr.validate(r); err != nil {
 		fmr.settings.Logger.Error(
-			"Invalid Firehose request",
+			"Invalid request",
 			zap.Error(err),
 		)
 		fmr.sendResponse(w, requestID, statusCode, err)
@@ -184,24 +184,24 @@ func (fmr *firehoseReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fmr.sendResponse(w, requestID, http.StatusOK, nil)
 }
 
-// validate checks the Firehose access key in the header against
+// validate checks the access key in the header against
 // the one passed into the Config
-func (fmr *firehoseReceiver) validate(r *http.Request) (int, error) {
+func (fmr *httpLogsReceiver) validate(r *http.Request) (int, error) {
 	if string(fmr.config.AccessKey) == "" {
 		// No access key is configured - accept all requests.
 		return http.StatusAccepted, nil
 	}
-	if accessKey := r.Header.Get(headerFirehoseAccessKey); accessKey == string(fmr.config.AccessKey) {
+	if accessKey := r.Header.Get(headerHttpAccessKey); accessKey == string(fmr.config.AccessKey) {
 		return http.StatusAccepted, nil
 	}
 	return http.StatusUnauthorized, errInvalidAccessKey
 }
 
 // getCommonAttributes unmarshalls the common attributes from the request header
-func (*firehoseReceiver) getCommonAttributes(r *http.Request) (map[string]string, error) {
+func (*httpLogsReceiver) getCommonAttributes(r *http.Request) (map[string]string, error) {
 	attributes := make(map[string]string)
-	if commonAttributes := r.Header.Get(headerFirehoseCommonAttributes); commonAttributes != "" {
-		var fca firehoseCommonAttributes
+	if commonAttributes := r.Header.Get(headerHttpCommonAttributes); commonAttributes != "" {
+		var fca httpLogsCommonAttributes
 		if err := json.Unmarshal([]byte(commonAttributes), &fca); err != nil {
 			return nil, err
 		}
@@ -210,13 +210,13 @@ func (*firehoseReceiver) getCommonAttributes(r *http.Request) (map[string]string
 	return attributes, nil
 }
 
-// sendResponse writes a response to Firehose in the expected format.
-func (fmr *firehoseReceiver) sendResponse(w http.ResponseWriter, requestID string, statusCode int, err error) {
+// sendResponse writes a response to in the expected format.
+func (fmr *httpLogsReceiver) sendResponse(w http.ResponseWriter, requestID string, statusCode int, err error) {
 	var errorMessage string
 	if err != nil {
 		errorMessage = err.Error()
 	}
-	body := firehoseResponse{
+	body := httpLogsResponse{
 		RequestID:    requestID,
 		Timestamp:    time.Now().UnixMilli(),
 		ErrorMessage: errorMessage,

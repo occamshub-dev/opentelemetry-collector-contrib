@@ -116,7 +116,7 @@ func TestMetricsReceiver_Start(t *testing.T) {
 
 			assert.IsType(t,
 				testCase.wantUnmarshalerType,
-				got.(*firehoseReceiver).consumer.(*metricsConsumer).unmarshaler,
+				got.(*httpLogsReceiver).consumer.(*metricsConsumer).unmarshaler,
 			)
 		})
 	}

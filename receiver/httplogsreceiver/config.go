@@ -14,12 +14,11 @@ import (
 var errRecordTypeEncodingSet = errors.New("record_type must not be set when encoding is set")
 
 type Config struct {
-	// ServerConfig is used to set up the Firehose delivery
-	// endpoint. The Firehose delivery stream expects an HTTPS
+	// ServerConfig is used to set up the HTTP logs delivery
+	// endpoint. The HTTP logs delivery stream expects an HTTPS
 	// endpoint, so TLSs must be used to enable that.
 	confighttp.ServerConfig `mapstructure:",squash"`
-	// Encoding identifies the encoding of records received from
-	// Firehose.
+	// Encoding identifies the encoding of records received.
 	//
 	// Defaults to telemetry-specific encodings: "cwlog" for logs,
 	// and "cwmetrics" for metrics. This default behavior is
@@ -32,8 +31,6 @@ type Config struct {
 	// Deprecated: [v0.121.0] use Encoding instead.
 	RecordType string `mapstructure:"record_type"`
 	// AccessKey is checked against the one received with each request.
-	// This can be set when creating or updating the Firehose delivery
-	// stream.
 	AccessKey configopaque.String `mapstructure:"access_key"`
 }
 
