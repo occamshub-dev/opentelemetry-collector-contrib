@@ -4,7 +4,6 @@
 package httplogsreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/httplogsreceiver"
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,6 +19,9 @@ import (
 	"go.opentelemetry.io/collector/component/componentstatus"
 	"go.opentelemetry.io/collector/receiver"
 	"go.uber.org/zap"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/httplogsreceiver/internal/decode"
 )
 
 const (
@@ -28,27 +30,40 @@ const (
 	headerHttpCommonAttributes = "X-Common-Attributes"
 	headerContentType          = "Content-Type"
 	headerContentLength        = "Content-Length"
+	headerContentEncoding      = "Content-Encoding"
 )
 
 var (
-	errInvalidAccessKey         = errors.New("invalid access key")
-	errInHeaderMissingRequestID = errors.New("missing request id in header")
-	errInBodyMissingRequestID   = errors.New("missing request id in body")
-	errInBodyDiffRequestID      = errors.New("different request id in body")
+	errInvalidAccessKey           = errors.New("invalid access key")
+	errUnsupportedContentEncoding = errors.New("unsupported content encoding")
+	errInHeaderMissingRequestID   = errors.New("missing request id in header")
+	errInBodyMissingRequestID     = errors.New("missing request id in body")
+	errInBodyDiffRequestID        = errors.New("different request id in body")
 )
 
 // The httpLogsConsumer is responsible for using the unmarshaler and the consumer.
 type httpLogsConsumer interface {
 	Start(context.Context, component.Host) error
 
-	// Consume unmarshals and consumes the records returned by f.
-	Consume(ctx context.Context, f nextRecordFunc, commonAttributes map[string]string) (int, error)
+	// Consume decodes and consumes all the records found in the
+	// (decompressed) request body.
+	Consume(ctx context.Context, body io.Reader, commonAttributes map[string]string) (int, error)
 }
 
-// nextRecordFunc is a function provided to consumers for obtaining the
-// next record to consume. The function returns (nil, io.EOF) when there
-// are no more records.
-type nextRecordFunc func() ([]byte, error)
+// decoderOptions returns the decoder flush options derived from the receiver
+// config for use with streaming decoders. Unset (0) values are intentionally
+// not forwarded: 0 would disable the corresponding flush criterion, and the
+// decoders apply their own defaults when no options are given.
+func decoderOptions(config *Config) []encoding.DecoderOption {
+	var options []encoding.DecoderOption
+	if config.FlushItems > 0 {
+		options = append(options, encoding.WithFlushItems(config.FlushItems))
+	}
+	if config.FlushBytes > 0 {
+		options = append(options, encoding.WithFlushBytes(config.FlushBytes))
+	}
+	return options
+}
 
 // httpLogsReceiver
 type httpLogsReceiver struct {
@@ -159,19 +174,31 @@ func (fmr *httpLogsReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 
-	scanner := bufio.NewScanner(r.Body)
-	scanner.Split(bufio.ScanLines)
-	nextRecord := func() ([]byte, error) {
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
-				return nil, err
-			}
-			return nil, io.EOF
-		}
-		return scanner.Bytes(), nil
+	contentEncoding := r.Header.Get(headerContentEncoding)
+	if !fmr.config.contentEncodingAllowed(contentEncoding) {
+		err = fmt.Errorf("%w: %q", errUnsupportedContentEncoding, contentEncoding)
+		fmr.settings.Logger.Error(
+			"Request rejected due to content encoding",
+			zap.Error(err),
+		)
+		fmr.sendResponse(w, requestID, http.StatusBadRequest, err)
+		return
 	}
 
-	statusCode, err := fmr.consumer.Consume(ctx, nextRecord, commonAttributes)
+	body, err := decode.ReaderFor(r.Body, contentEncoding)
+	if err != nil {
+		fmr.settings.Logger.Error(
+			"Failed to set up decompression for the request body",
+			zap.Error(err),
+		)
+		fmr.sendResponse(w, requestID, http.StatusBadRequest, err)
+		return
+	}
+	if closer, ok := body.(io.Closer); ok {
+		defer closer.Close()
+	}
+
+	statusCode, err := fmr.consumer.Consume(ctx, body, commonAttributes)
 	if err != nil {
 		fmr.settings.Logger.Error(
 			"Unable to consume records",

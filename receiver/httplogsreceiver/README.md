@@ -64,6 +64,38 @@ Deprecated, use `encoding` instead. `record_type` will be removed in a future re
 ### access\_key (Required):
 The access key to be checked on each request received. This can be set when creating or updating the delivery stream.
 
+### compression\_algorithms:
+
+The allow-list of request body encodings accepted from the `Content-Encoding` header. The raw
+body is decompressed with the named codec before it is handed to the decoder. The empty value,
+`none`, and `identity` all select the plain body. Each entry must be one of `gzip`, `zstd`,
+`zlib`, or `deflate`. By default the receiver accepts identity, `gzip`, `zstd`, `zlib`, and
+`deflate`; setting `compression_algorithms` restricts the set to identity plus the listed codecs.
+
+```yaml
+receivers:
+  httplogs:
+    compression_algorithms: [ gzip, zstd ]
+```
+
+Requests whose `Content-Encoding` header is not on the allow-list are rejected with `400 Bad
+Request` and no records are consumed.
+
+### flush\_items:
+
+The maximum number of decoded records a streaming decoder holds before forwarding a batch
+downstream. `0` (the default) defers to the decoder's own default, which is `1000`. Must not be
+negative.
+
+### flush\_bytes:
+
+The maximum number of decoded body bytes a streaming decoder holds before forwarding a batch
+downstream. `0` (the default) defers to the decoder's own default, which is `1 MiB`. Must not be
+negative.
+
+`flush_items` and `flush_bytes` only take effect when the configured encoding exposes a
+streaming decoder.
+
 ## Encodings
 
 Any encoding extension can be used with this receiver. There are additionally built-in encodings, which are deprecated.

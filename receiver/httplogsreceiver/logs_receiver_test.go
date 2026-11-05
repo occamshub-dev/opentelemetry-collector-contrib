@@ -148,7 +148,7 @@ func TestLogsConsumer_Errors(t *testing.T) {
 				unmarshaler: unmarshalertest.NewErrLogs(testCase.unmarshalerErr),
 				consumer:    consumertest.NewErr(testCase.consumerErr),
 			}
-			gotStatus, gotErr := lc.Consume(t.Context(), newNextRecordFunc([][]byte{{}}), nil)
+			gotStatus, gotErr := lc.Consume(t.Context(), requestBody([]byte("")), nil)
 			require.Equal(t, testCase.wantStatus, gotStatus)
 			require.Equal(t, testCase.wantErr, gotErr)
 		})
@@ -164,7 +164,7 @@ func TestLogsConsumer(t *testing.T) {
 			unmarshaler: unmarshalertest.NewWithLogs(base),
 			consumer:    &rc,
 		}
-		gotStatus, gotErr := lc.Consume(t.Context(), newNextRecordFunc([][]byte{{}}), map[string]string{
+		gotStatus, gotErr := lc.Consume(t.Context(), requestBody([]byte("")), map[string]string{
 			"CommonAttributes": "Test",
 		})
 		require.Equal(t, http.StatusOK, gotStatus)
@@ -175,7 +175,7 @@ func TestLogsConsumer(t *testing.T) {
 		gotRm := gotRms.At(0)
 		require.Equal(t, 1, gotRm.Resource().Attributes().Len())
 	})
-	t.Run("WithMultipleRecords", func(t *testing.T) {
+	t.Run("WithMultipleBatches", func(t *testing.T) {
 		logs0, logRecords0 := newLogs("service0", "scope0")
 		logRecords0.AppendEmpty().Body().SetStr("record0")
 		logRecords0.AppendEmpty().Body().SetStr("record1")
@@ -184,22 +184,50 @@ func TestLogsConsumer(t *testing.T) {
 		logRecords1.AppendEmpty().Body().SetStr("record2")
 		logRecords1.AppendEmpty().Body().SetStr("record3")
 
-		logsRemaining := []plog.Logs{logs0, logs1}
-		var unmarshaler unmarshalLogsFunc = func([]byte) (plog.Logs, error) {
-			logs := logsRemaining[0]
-			logsRemaining = logsRemaining[1:]
-			return logs, nil
-		}
-
 		rc := logsRecordConsumer{}
-		lc := &logsConsumer{unmarshaler: unmarshaler, consumer: &rc}
-		nextRecord := newNextRecordFunc(make([][]byte, len(logsRemaining)))
-		gotStatus, gotErr := lc.Consume(t.Context(), nextRecord, nil)
+		lc := &logsConsumer{
+			config:      createDefaultConfig().(*Config),
+			settings:    receivertest.NewNopSettings(metadata.Type),
+			unmarshaler: &fakePlogLogsDecoderFactory{batches: []plog.Logs{logs0, logs1}},
+			consumer:    &rc,
+		}
+		gotStatus, gotErr := lc.Consume(t.Context(), requestBody([]byte("stream of records")), nil)
 		require.Equal(t, http.StatusOK, gotStatus)
 		require.NoError(t, gotErr)
 		require.Len(t, rc.results, 2)
 		assert.NoError(t, plogtest.CompareLogs(logs0, rc.results[0]))
 		assert.NoError(t, plogtest.CompareLogs(logs1, rc.results[1]))
+	})
+	t.Run("WithDecoderError", func(t *testing.T) {
+		testErr := errors.New("decode error")
+		rc := logsRecordConsumer{}
+		lc := &logsConsumer{
+			config:      createDefaultConfig().(*Config),
+			settings:    receivertest.NewNopSettings(metadata.Type),
+			unmarshaler: &fakePlogLogsDecoderFactory{batchError: testErr, batches: []plog.Logs{plog.NewLogs()}},
+			consumer:    &rc,
+		}
+		gotStatus, gotErr := lc.Consume(t.Context(), requestBody([]byte("stream of records")), nil)
+		require.Equal(t, http.StatusBadRequest, gotStatus)
+		require.ErrorIs(t, gotErr, testErr)
+	})
+	t.Run("WithDecoderFactoryError", func(t *testing.T) {
+		fallbackLogs, _ := newLogs("service0", "scope0")
+		rc := logsRecordConsumer{}
+		lc := &logsConsumer{
+			config:   createDefaultConfig().(*Config),
+			settings: receivertest.NewNopSettings(metadata.Type),
+			unmarshaler: &fakePlogLogsDecoderFactory{
+				newDecoderError: errors.New("streaming not supported"),
+				fallback:        unmarshalertest.NewWithLogs(fallbackLogs),
+			},
+			consumer: &rc,
+		}
+		gotStatus, gotErr := lc.Consume(t.Context(), requestBody([]byte("stream of records")), nil)
+		require.Equal(t, http.StatusOK, gotStatus)
+		require.NoError(t, gotErr)
+		require.Len(t, rc.results, 1)
+		assert.NoError(t, plogtest.CompareLogs(fallbackLogs, rc.results[0]))
 	})
 }
 
@@ -222,10 +250,4 @@ func newScope(scopeName string) pcommon.InstrumentationScope {
 	s := pcommon.NewInstrumentationScope()
 	s.SetName(scopeName)
 	return s
-}
-
-type unmarshalLogsFunc func([]byte) (plog.Logs, error)
-
-func (f unmarshalLogsFunc) UnmarshalLogs(data []byte) (plog.Logs, error) {
-	return f(data)
 }

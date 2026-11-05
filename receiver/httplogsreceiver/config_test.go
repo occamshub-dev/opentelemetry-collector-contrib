@@ -39,8 +39,9 @@ func TestLoadConfig(t *testing.T) {
 			err = xconfmap.Validate(cfg)
 			assert.NoError(t, err)
 			require.Equal(t, &Config{
-				RecordType: configType,
-				AccessKey:  "some_access_key",
+				RecordType:            configType,
+				AccessKey:             "some_access_key",
+				CompressionAlgorithms: defaultCompressionAlgorithms,
 				ServerConfig: confighttp.ServerConfig{
 					NetAddr: confignet.AddrConfig{
 						Transport: "tcp",

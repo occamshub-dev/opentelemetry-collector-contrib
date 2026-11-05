@@ -6,6 +6,17 @@ properties:
   encoding:
     description: 'Encoding identifies the encoding of records received. Defaults to telemetry-specific encodings: "cwlog" for logs, and "cwmetrics" for metrics. This default behavior is deprecated as of v0.149.0, and in the future it will be required to specify the encoding explicitly.'
     type: string
+  compression_algorithms:
+    description: 'The allow-list of request body encodings accepted from the Content-Encoding header, decompressed in place of the raw body before it is handed to the decoder. identity (the empty value) and the encodings listed here are accepted. Defaults to "" (identity), gzip, zstd, zlib, deflate.'
+    type: array
+    items:
+      type: string
+  flush_items:
+    description: 'The maximum number of decoded records a streaming decoder holds before handing a batch downstream. 0 means use the decoder default (1000).'
+    type: integer
+  flush_bytes:
+    description: 'The maximum number of decoded body bytes a streaming decoder holds before handing a batch downstream. 0 means use the decoder default (1 MiB).'
+    type: integer
   record_type:
     description: 'RecordType is an alias for Encoding for backwards compatibility. It is an error to specify both encoding and record_type. Deprecated: [v0.121.0] use Encoding instead.'
     type: string

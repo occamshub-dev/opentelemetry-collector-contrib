@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/receiver/receivertest"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/httplogsreceiver/internal/metadata"
 )
 
@@ -47,18 +48,18 @@ func (*nopHttpLogsConsumer) Start(context.Context, component.Host) error {
 	return nil
 }
 
-func (nfc *nopHttpLogsConsumer) Consume(context.Context, nextRecordFunc, map[string]string) (int, error) {
+func (nfc *nopHttpLogsConsumer) Consume(context.Context, io.Reader, map[string]string) (int, error) {
 	return nfc.statusCode, nfc.err
 }
 
-type httpLogsConsumerFunc func(context.Context, nextRecordFunc, map[string]string) (int, error)
+type httpLogsConsumerFunc func(context.Context, io.Reader, map[string]string) (int, error)
 
 func (httpLogsConsumerFunc) Start(context.Context, component.Host) error {
 	return nil
 }
 
-func (f httpLogsConsumerFunc) Consume(ctx context.Context, next nextRecordFunc, common map[string]string) (int, error) {
-	return f(ctx, next, common)
+func (f httpLogsConsumerFunc) Consume(ctx context.Context, body io.Reader, common map[string]string) (int, error) {
+	return f(ctx, body, common)
 }
 
 func TestStart(t *testing.T) {
@@ -239,15 +240,10 @@ func testHttpRecord(data string) string {
 	return data
 }
 
-func newNextRecordFunc(records [][]byte) nextRecordFunc {
-	return func() ([]byte, error) {
-		if len(records) == 0 {
-			return nil, io.EOF
-		}
-		next := records[0]
-		records = records[1:]
-		return next, nil
-	}
+// requestBody concatenates the given records into the body of a request,
+// mimicking newline-delimited records on the wire.
+func requestBody(records ...[]byte) io.Reader {
+	return bytes.NewReader(bytes.Join(records, []byte("\n")))
 }
 
 type hostWithExtensions struct {
@@ -290,3 +286,105 @@ func (pmetricUnmarshalerExtension) Shutdown(context.Context) error {
 func (e pmetricUnmarshalerExtension) UnmarshalMetrics([]byte) (pmetric.Metrics, error) {
 	return e.metrics, nil
 }
+
+// fakePlogLogsDecoderFactory implements both plog.Unmarshaler and
+// encoding.LogsDecoderFactory:
+//
+//   - NewLogsDecoder returns newDecoderError, or a decoder that replays the
+//     configured batches (followed by batchError, or io.EOF by default).
+//   - UnmarshalLogs delegates to fallback when NewLogsDecoder errors.
+type fakePlogLogsDecoderFactory struct {
+	batches         []plog.Logs
+	batchError      error
+	newDecoderError error
+	fallback        plog.Unmarshaler
+}
+
+var (
+	_ plog.Unmarshaler            = (*fakePlogLogsDecoderFactory)(nil)
+	_ encoding.LogsDecoderFactory = (*fakePlogLogsDecoderFactory)(nil)
+)
+
+func (f *fakePlogLogsDecoderFactory) UnmarshalLogs(data []byte) (plog.Logs, error) {
+	if f.fallback != nil {
+		return f.fallback.UnmarshalLogs(data)
+	}
+	return plog.NewLogs(), nil
+}
+
+func (f *fakePlogLogsDecoderFactory) NewLogsDecoder(_ io.Reader, _ ...encoding.DecoderOption) (encoding.LogsDecoder, error) {
+	if f.newDecoderError != nil {
+		return nil, f.newDecoderError
+	}
+	return &fakePlogLogsDecoder{batches: f.batches, batchError: f.batchError}, nil
+}
+
+// fakePlogLogsDecoder replays its batches one per DecodeLogs call. Once the
+// batches are exhausted it returns batchError (or io.EOF if nil).
+type fakePlogLogsDecoder struct {
+	batches    []plog.Logs
+	batchError error
+}
+
+func (d *fakePlogLogsDecoder) DecodeLogs() (plog.Logs, error) {
+	if len(d.batches) == 0 {
+		if d.batchError != nil {
+			return plog.NewLogs(), d.batchError
+		}
+		return plog.NewLogs(), io.EOF
+	}
+	logs := d.batches[0]
+	d.batches = d.batches[1:]
+	return logs, nil
+}
+
+func (*fakePlogLogsDecoder) Offset() int64 { return 0 }
+
+// fakePmetricMetricsDecoderFactory mirrors fakePlogLogsDecoderFactory for
+// metrics.
+type fakePmetricMetricsDecoderFactory struct {
+	batches         []pmetric.Metrics
+	batchError      error
+	newDecoderError error
+	fallback        pmetric.Unmarshaler
+}
+
+var (
+	_ pmetric.Unmarshaler            = (*fakePmetricMetricsDecoderFactory)(nil)
+	_ encoding.MetricsDecoderFactory = (*fakePmetricMetricsDecoderFactory)(nil)
+)
+
+func (f *fakePmetricMetricsDecoderFactory) UnmarshalMetrics(data []byte) (pmetric.Metrics, error) {
+	if f.fallback != nil {
+		return f.fallback.UnmarshalMetrics(data)
+	}
+	return pmetric.NewMetrics(), nil
+}
+
+func (f *fakePmetricMetricsDecoderFactory) NewMetricsDecoder(_ io.Reader, _ ...encoding.DecoderOption) (encoding.MetricsDecoder, error) {
+	if f.newDecoderError != nil {
+		return nil, f.newDecoderError
+	}
+	return &fakePmetricMetricsDecoder{batches: f.batches, batchError: f.batchError}, nil
+}
+
+// fakePmetricMetricsDecoder replays its batches one per DecodeMetrics call.
+// Once the batches are exhausted it returns batchError (or io.EOF if nil).
+type fakePmetricMetricsDecoder struct {
+	batches    []pmetric.Metrics
+	batchError error
+}
+
+func (d *fakePmetricMetricsDecoder) DecodeMetrics() (pmetric.Metrics, error) {
+	if len(d.batches) == 0 {
+		if d.batchError != nil {
+			return pmetric.NewMetrics(), d.batchError
+		}
+		return pmetric.NewMetrics(), io.EOF
+	}
+	metrics := d.batches[0]
+	d.batches = d.batches[1:]
+	return metrics, nil
+}
+
+func (*fakePmetricMetricsDecoder) Offset() int64 { return 0 }

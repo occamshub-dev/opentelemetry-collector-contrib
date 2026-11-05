@@ -157,7 +157,7 @@ func TestMetricsConsumer_Errors(t *testing.T) {
 			}
 			gotStatus, gotErr := mc.Consume(
 				t.Context(),
-				newNextRecordFunc([][]byte{{}}),
+				requestBody([]byte("")),
 				nil,
 			)
 			require.Equal(t, testCase.wantStatus, gotStatus)
@@ -177,7 +177,7 @@ func TestMetricsConsumer(t *testing.T) {
 		}
 		gotStatus, gotErr := mc.Consume(
 			t.Context(),
-			newNextRecordFunc([][]byte{{}}),
+			requestBody([]byte("")),
 			map[string]string{
 				"CommonAttributes": "Test",
 			},
@@ -190,7 +190,7 @@ func TestMetricsConsumer(t *testing.T) {
 		gotRm := gotRms.At(0)
 		require.Equal(t, 1, gotRm.Resource().Attributes().Len())
 	})
-	t.Run("WithMultipleRecords", func(t *testing.T) {
+	t.Run("WithMultipleBatches", func(t *testing.T) {
 		metrics0, metricSlice0 := newMetrics("service0", "scope0")
 		sum0unit0 := addDeltaSumMetric(metricSlice0, "sum0", "unit0")
 		addSumDataPoint(sum0unit0, 1)
@@ -205,22 +205,53 @@ func TestMetricsConsumer(t *testing.T) {
 		sum0unit0 = addDeltaSumMetric(scopeMetrics1.Metrics(), "sum1", "unit0")
 		addSumDataPoint(sum0unit0, 4)
 
-		metricsRemaining := []pmetric.Metrics{metrics0, metrics1}
-		var unmarshaler unmarshalMetricsFunc = func([]byte) (pmetric.Metrics, error) {
-			metrics := metricsRemaining[0]
-			metricsRemaining = metricsRemaining[1:]
-			return metrics, nil
-		}
-
 		rc := metricsRecordConsumer{}
-		lc := &metricsConsumer{unmarshaler: unmarshaler, consumer: &rc}
-		nextRecord := newNextRecordFunc(make([][]byte, len(metricsRemaining)))
-		gotStatus, gotErr := lc.Consume(t.Context(), nextRecord, nil)
+		mc := &metricsConsumer{
+			config:      createDefaultConfig().(*Config),
+			settings:    receivertest.NewNopSettings(metadata.Type),
+			unmarshaler: &fakePmetricMetricsDecoderFactory{batches: []pmetric.Metrics{metrics0, metrics1}},
+			consumer:    &rc,
+		}
+		gotStatus, gotErr := mc.Consume(t.Context(), requestBody([]byte("stream of records")), nil)
 		require.Equal(t, http.StatusOK, gotStatus)
 		require.NoError(t, gotErr)
 		require.Len(t, rc.results, 2)
 		assert.NoError(t, pmetrictest.CompareMetrics(metrics0, rc.results[0]))
 		assert.NoError(t, pmetrictest.CompareMetrics(metrics1, rc.results[1]))
+	})
+	t.Run("WithDecoderError", func(t *testing.T) {
+		testErr := errors.New("decode error")
+		rc := metricsRecordConsumer{}
+		mc := &metricsConsumer{
+			config:      createDefaultConfig().(*Config),
+			settings:    receivertest.NewNopSettings(metadata.Type),
+			unmarshaler: &fakePmetricMetricsDecoderFactory{batchError: testErr},
+			consumer:    &rc,
+		}
+		gotStatus, gotErr := mc.Consume(t.Context(), requestBody([]byte("stream of records")), nil)
+		require.Equal(t, http.StatusBadRequest, gotStatus)
+		require.ErrorIs(t, gotErr, testErr)
+	})
+	t.Run("WithDecoderFactoryError", func(t *testing.T) {
+		fallbackMetrics0, metricSlice0 := newMetrics("service0", "scope0")
+		sum0unit0 := addDeltaSumMetric(metricSlice0, "sum0", "unit0")
+		addSumDataPoint(sum0unit0, 1)
+
+		rc := metricsRecordConsumer{}
+		mc := &metricsConsumer{
+			config:   createDefaultConfig().(*Config),
+			settings: receivertest.NewNopSettings(metadata.Type),
+			unmarshaler: &fakePmetricMetricsDecoderFactory{
+				newDecoderError: errors.New("streaming not supported"),
+				fallback:        unmarshalertest.NewWithMetrics(fallbackMetrics0),
+			},
+			consumer: &rc,
+		}
+		gotStatus, gotErr := mc.Consume(t.Context(), requestBody([]byte("stream of records")), nil)
+		require.Equal(t, http.StatusOK, gotStatus)
+		require.NoError(t, gotErr)
+		require.Len(t, rc.results, 1)
+		assert.NoError(t, pmetrictest.CompareMetrics(fallbackMetrics0, rc.results[0]))
 	})
 }
 
@@ -245,10 +276,4 @@ func addDeltaSumMetric(metrics pmetric.MetricSlice, name, unit string) pmetric.S
 func addSumDataPoint(sum pmetric.Sum, value int64) {
 	dp := sum.DataPoints().AppendEmpty()
 	dp.SetIntValue(value)
-}
-
-type unmarshalMetricsFunc func([]byte) (pmetric.Metrics, error)
-
-func (f unmarshalMetricsFunc) UnmarshalMetrics(data []byte) (pmetric.Metrics, error) {
-	return f(data)
 }

@@ -16,7 +16,9 @@ import (
 	"go.opentelemetry.io/collector/extension"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/receiver"
+	"go.uber.org/zap"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding/awscloudwatchmetricstreamsencodingextension"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/httplogsreceiver/internal/unmarshaler/cwmetricstream"
 )
@@ -117,37 +119,102 @@ func (c *metricsConsumer) newUnmarshalerFromEncoding(
 	return unmarshaler, nil
 }
 
-// Consume uses the configured unmarshaler to deserialize each record,
-// with each resulting pmetric.Metrics being sent to the next consumer
-// as they are unmarshalled.
-func (c *metricsConsumer) Consume(ctx context.Context, nextRecord nextRecordFunc, commonAttributes map[string]string) (int, error) {
+// Consume deserializes the (decompressed) request body and sends the
+// resulting pmetric.Metrics to the next consumer.
+//
+// If the configured unmarshaler provides a streaming decoder, batches are
+// decoded and forwarded as they are produced from the body, so the receiver
+// never holds more than one decoder batch in memory. Otherwise (and when the
+// unmarshaler does not implement streaming), the whole body is unmarshalled
+// at once.
+func (c *metricsConsumer) Consume(ctx context.Context, body io.Reader, commonAttributes map[string]string) (int, error) {
+	if factory, ok := c.unmarshaler.(encoding.MetricsDecoderFactory); ok {
+		decoder, err := factory.NewMetricsDecoder(body, decoderOptions(c.config)...)
+		if err == nil {
+			return c.consumeDecodedMetrics(ctx, decoder, commonAttributes)
+		}
+		// The extension accepted this reader but does not stream the given
+		// format (or its stream could not be started). Buffer the body and
+		// unmarshal it in one piece instead.
+		c.settings.Logger.Warn(
+			"Streaming decode not available for encoding; falling back to whole-body unmarshalling.",
+			zap.Error(err),
+		)
+	}
+	return c.consumeWholeBody(ctx, body, commonAttributes)
+}
+
+// consumeDecodedMetrics forwards each batch produced by a streaming decoder to
+// the next consumer as it is decoded.
+func (c *metricsConsumer) consumeDecodedMetrics(
+	ctx context.Context,
+	decoder encoding.MetricsDecoder,
+	commonAttributes map[string]string,
+) (int, error) {
 	for {
-		record, err := nextRecord()
-		if errors.Is(err, io.EOF) {
+		metrics, err := decoder.DecodeMetrics()
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				return http.StatusBadRequest, fmt.Errorf("decoding metrics from the request body: %w", err)
+			}
+			// Some decoders deliver the last partial batch together with
+			// io.EOF, so it must still be forwarded.
+			if metrics.MetricCount() > 0 {
+				if statusCode, err := c.forwardMetrics(ctx, metrics, commonAttributes); err != nil {
+					return statusCode, err
+				}
+			}
 			break
 		}
-		metrics, err := c.unmarshaler.UnmarshalMetrics(record)
-		if err != nil {
-			return http.StatusBadRequest, err
+		if metrics.MetricCount() > 0 {
+			if statusCode, err := c.forwardMetrics(ctx, metrics, commonAttributes); err != nil {
+				return statusCode, err
+			}
 		}
+	}
+	return http.StatusOK, nil
+}
 
-		if commonAttributes != nil {
-			for i := 0; i < metrics.ResourceMetrics().Len(); i++ {
-				rm := metrics.ResourceMetrics().At(i)
-				for k, v := range commonAttributes {
-					if _, found := rm.Resource().Attributes().Get(k); !found {
-						rm.Resource().Attributes().PutStr(k, v)
-					}
+// consumeWholeBody reads the entire request body and unmarshalls it in one
+// piece with the configured unmarshaler.
+func (c *metricsConsumer) consumeWholeBody(
+	ctx context.Context,
+	body io.Reader,
+	commonAttributes map[string]string,
+) (int, error) {
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		return http.StatusBadRequest, err
+	}
+	metrics, err := c.unmarshaler.UnmarshalMetrics(raw)
+	if err != nil {
+		return http.StatusBadRequest, err
+	}
+	return c.forwardMetrics(ctx, metrics, commonAttributes)
+}
+
+// forwardMetrics attaches common attributes (if any) to each resource of a
+// decoded batch and sends it to the next consumer.
+func (c *metricsConsumer) forwardMetrics(
+	ctx context.Context,
+	metrics pmetric.Metrics,
+	commonAttributes map[string]string,
+) (int, error) {
+	if commonAttributes != nil {
+		for i := 0; i < metrics.ResourceMetrics().Len(); i++ {
+			rm := metrics.ResourceMetrics().At(i)
+			for k, v := range commonAttributes {
+				if _, found := rm.Resource().Attributes().Get(k); !found {
+					rm.Resource().Attributes().PutStr(k, v)
 				}
 			}
 		}
-
-		if err := c.consumer.ConsumeMetrics(ctx, metrics); err != nil {
-			if consumererror.IsPermanent(err) {
-				return http.StatusBadRequest, err
-			}
-			return http.StatusServiceUnavailable, err
+	}
+	if err := c.consumer.ConsumeMetrics(ctx, metrics); err != nil {
+		if consumererror.IsPermanent(err) {
+			return http.StatusBadRequest, err
 		}
+		return http.StatusServiceUnavailable, err
 	}
 	return http.StatusOK, nil
 }

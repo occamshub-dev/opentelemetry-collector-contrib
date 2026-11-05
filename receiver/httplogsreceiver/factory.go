@@ -39,6 +39,7 @@ func createDefaultConfig() component.Config {
 		ServerConfig: confighttp.ServerConfig{
 			NetAddr: netAddr,
 		},
+		CompressionAlgorithms: defaultCompressionAlgorithms,
 	}
 }
 
