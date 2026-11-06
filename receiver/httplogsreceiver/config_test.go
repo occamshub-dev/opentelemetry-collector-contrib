@@ -6,6 +6,7 @@ package httplogsreceiver
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -54,9 +55,58 @@ func TestLoadConfig(t *testing.T) {
 						},
 					}),
 				},
+				FileTracking: FileTrackingConfig{
+					FileAttribute:   defaultFileAttribute,
+					MaxTrackedFiles: defaultMaxTrackedFiles,
+					EntryTTL:        defaultEntryTTL,
+					StaleCheckpoint: staleCheckpointReject,
+					OnError:         onErrorPolicyDegrade,
+				},
 			}, cfg)
 		})
 	}
+}
+
+func TestLoadConfigFileTracking(t *testing.T) {
+	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "file_tracking_config.yaml"))
+	require.NoError(t, err)
+
+	factory := NewFactory()
+	cfg := factory.CreateDefaultConfig()
+
+	sub, err := cm.Sub(component.NewIDWithName(metadata.Type, "").String())
+	require.NoError(t, err)
+	require.NoError(t, sub.Unmarshal(cfg))
+
+	assert.NoError(t, xconfmap.Validate(cfg))
+
+	config := cfg.(*Config)
+	require.NotNil(t, config.StorageID)
+	assert.Equal(t, "memstorage/main", config.StorageID.String())
+	assert.Equal(t, FileTrackingConfig{
+		Enabled:         true,
+		FileAttribute:   "my.file",
+		MaxTrackedFiles: 42,
+		EntryTTL:        72 * time.Hour,
+		StaleCheckpoint: staleCheckpointReset,
+		OnError:         onErrorPolicyFail,
+	}, config.FileTracking)
+}
+
+func TestLoadConfigFileTrackingInvalid(t *testing.T) {
+	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "invalid_file_tracking_config.yaml"))
+	require.NoError(t, err)
+
+	factory := NewFactory()
+	cfg := factory.CreateDefaultConfig()
+
+	sub, err := cm.Sub(component.NewIDWithName(metadata.Type, "").String())
+	require.NoError(t, err)
+	require.NoError(t, sub.Unmarshal(cfg))
+
+	err = xconfmap.Validate(cfg)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errStaleCheckpointPolicy)
 }
 
 func TestLoadConfigInvalid(t *testing.T) {

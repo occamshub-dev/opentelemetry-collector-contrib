@@ -1,24 +1,58 @@
+$defs:
+  file_tracking_config:
+    description: FileTrackingConfig configures per-file, per-line delivery tracking. The delivered file must be identified in the X-Common-Attributes request header under the FileAttribute key. When enabled, every log record is additionally stamped with a file.line record attribute carrying its 1-based line number within the delivered file (see the README).
+    type: object
+    properties:
+      enabled:
+        description: 'Enabled turns on file tracking. Default: false.'
+        type: boolean
+      entry_ttl:
+        description: 'EntryTTL is the sliding time-to-live of a checkpoint entry: an entry that has not been updated within this duration is treated as absent. It bounds the window in which a stale checkpoint (file shrank or was replaced under the same name) can cause rejected deliveries. 0 means entries never expire. Default: 24h.'
+        type: string
+        format: duration
+      file_attribute:
+        description: 'FileAttribute is the key in the X-Common-Attributes header that holds the delivered file''s name (e.g. "somelocation/somefile.gz"). It is used verbatim as part of the checkpoint store key. Default: "file.path".'
+        type: string
+      max_tracked_files:
+        description: 'MaxTrackedFiles caps the number of tracked files in in-memory mode (i.e. when StorageID is unset); the least recently tracked file is evicted when the cap is exceeded. Ignored with a storage extension. 0 means unlimited. Default: 1000.'
+        type: integer
+      on_error:
+        description: 'OnError controls the behavior when the checkpoint store is unavailable mid-delivery: - "degrade" (default): continue untracked (at-least-once is preserved). - "fail": return 503 so the sender retries once the store is back.'
+        type: string
+      stale_checkpoint:
+        description: 'StaleCheckpoint controls the response when a resended file ends before the recorded checkpoint (it was truncated, shrunk, or is a different file reusing the name): - "reject" (default) returns 400; the entry clears on EntryTTL expiry, or on collector restart in in-memory mode. - "reset" clears the entry so the file is reprocessed from line 1 (the streamed request path reports 503 to trigger the sender''s retry).'
+        type: string
 type: object
 properties:
   access_key:
     description: AccessKey is checked against the one received with each request.
     $ref: go.opentelemetry.io/collector/config/configopaque.string
+  compression_algorithms:
+    description: CompressionAlgorithms is the allow-list of request body encodings accepted from the Content-Encoding header. identity (the empty value) and the encodings listed here are decompressed in place of the raw body before it is handed to the decoder. Defaults to [none, gzip, zstd, zlib, deflate].
+    type: array
+    items:
+      $ref: go.opentelemetry.io/collector/config/configcompression.type
   encoding:
     description: 'Encoding identifies the encoding of records received. Defaults to telemetry-specific encodings: "cwlog" for logs, and "cwmetrics" for metrics. This default behavior is deprecated as of v0.149.0, and in the future it will be required to specify the encoding explicitly.'
     type: string
-  compression_algorithms:
-    description: 'The allow-list of request body encodings accepted from the Content-Encoding header, decompressed in place of the raw body before it is handed to the decoder. identity (the empty value) and the encodings listed here are accepted. Defaults to "" (identity), gzip, zstd, zlib, deflate.'
-    type: array
-    items:
-      type: string
-  flush_items:
-    description: 'The maximum number of decoded records a streaming decoder holds before handing a batch downstream. 0 means use the decoder default (1000).'
-    type: integer
+  file_tracking:
+    description: 'FileTracking configures per-file, per-line delivery tracking: resending a file continues from the last successfully exported line instead of reprocessing from the beginning. Disabled by default.'
+    $ref: file_tracking_config
   flush_bytes:
-    description: 'The maximum number of decoded body bytes a streaming decoder holds before handing a batch downstream. 0 means use the decoder default (1 MiB).'
+    description: FlushBytes is the maximum number of decoded body bytes a streaming decoder holds before handing a batch downstream. 0 means use the decoder default (1 MiB).
     type: integer
+    x-customType: int64
+  flush_items:
+    description: FlushItems is the maximum number of decoded records a streaming decoder holds before handing a batch downstream. 0 means use the decoder default (1000).
+    type: integer
+    x-customType: int64
   record_type:
     description: 'RecordType is an alias for Encoding for backwards compatibility. It is an error to specify both encoding and record_type. Deprecated: [v0.121.0] use Encoding instead.'
     type: string
+  storage:
+    description: StorageID identifies the storage extension whose client is used to persist file tracking checkpoints (see FileTracking). Checkpoints are then shared across all replicas of the receiver. When unset (and FileTracking.Enabled is true), checkpoints are kept in process memory only, which is only safe for single-replica deployments.
+    x-pointer: true
+    type: string
+    x-customType: go.opentelemetry.io/collector/component.ID
 allOf:
   - $ref: go.opentelemetry.io/collector/config/confighttp.server_config

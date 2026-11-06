@@ -40,6 +40,13 @@ func createDefaultConfig() component.Config {
 			NetAddr: netAddr,
 		},
 		CompressionAlgorithms: defaultCompressionAlgorithms,
+		FileTracking: FileTrackingConfig{
+			FileAttribute:   defaultFileAttribute,
+			MaxTrackedFiles: defaultMaxTrackedFiles,
+			EntryTTL:        defaultEntryTTL,
+			StaleCheckpoint: staleCheckpointReject,
+			OnError:         onErrorPolicyDegrade,
+		},
 	}
 }
 

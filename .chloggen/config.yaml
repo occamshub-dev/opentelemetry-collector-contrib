@@ -294,6 +294,7 @@ components:
     - receiver/haproxy
     - receiver/host_metrics
     - receiver/http_check
+    - receiver/httplogs
     - receiver/huaweicloudcesreceiver
     - receiver/icmp_check
     - receiver/iis

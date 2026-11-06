@@ -35,6 +35,9 @@ type logsConsumer struct {
 	// unmarshaler is the configured plog.Unmarshaler
 	// to use when processing the records.
 	unmarshaler plog.Unmarshaler
+	// tracker holds the per-file delivery checkpoints of this receiver
+	// instance; it is nil when file tracking is disabled.
+	tracker *fileTracker
 }
 
 var _ httpLogsConsumer = (*logsConsumer)(nil)
@@ -59,8 +62,15 @@ func newLogsReceiver(
 }
 
 // Start sets the consumer's log unmarshaler to either a built-in
-// unmarshaler or one loaded from an encoding extension.
-func (c *logsConsumer) Start(_ context.Context, host component.Host) error {
+// unmarshaler or one loaded from an encoding extension, and initializes the
+// file tracker (no-op when file tracking is disabled).
+func (c *logsConsumer) Start(ctx context.Context, host component.Host) error {
+	tracker, err := newFileTracker(ctx, c.config, c.settings, host)
+	if err != nil {
+		return fmt.Errorf("failed to initialize file tracking: %w", err)
+	}
+	c.tracker = tracker
+
 	encoding := c.config.Encoding
 	if encoding == "" {
 		encoding = c.config.RecordType
@@ -93,10 +103,14 @@ func (c *logsConsumer) Start(_ context.Context, host component.Host) error {
 // unmarshaler does not implement streaming), the whole body is unmarshalled
 // at once.
 func (c *logsConsumer) Consume(ctx context.Context, body io.Reader, commonAttributes map[string]string) (int, error) {
+	body, session, statusCode, err := c.tracker.establish(ctx, body, commonAttributes)
+	if err != nil {
+		return statusCode, err
+	}
 	if factory, ok := c.unmarshaler.(encoding.LogsDecoderFactory); ok {
 		decoder, err := factory.NewLogsDecoder(body, decoderOptions(c.config)...)
 		if err == nil {
-			return c.consumeDecodedLogs(ctx, decoder, commonAttributes)
+			return c.consumeDecodedLogs(ctx, decoder, session, commonAttributes)
 		}
 		// The extension accepted this reader but does not stream the given
 		// format (or its stream could not be started). Buffer the body and
@@ -106,36 +120,46 @@ func (c *logsConsumer) Consume(ctx context.Context, body io.Reader, commonAttrib
 			zap.Error(err),
 		)
 	}
-	return c.consumeWholeBody(ctx, body, commonAttributes)
+	return c.consumeWholeBody(ctx, body, session, commonAttributes)
 }
 
 // consumeDecodedLogs forwards each batch produced by a streaming decoder to
-// the next consumer as it is decoded.
+// the next consumer as it is decoded. When the request carries a file
+// tracking session, each batch is anchored at the decoder's offset, stamped
+// with file.line (when the 1:1 guard holds), and its checkpoint is saved
+// only after the batch was forwarded successfully.
 func (c *logsConsumer) consumeDecodedLogs(
 	ctx context.Context,
 	decoder encoding.LogsDecoder,
+	session *fileSession,
 	commonAttributes map[string]string,
 ) (int, error) {
 	for {
 		logs, err := decoder.DecodeLogs()
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
+				if session.stale(err) {
+					return session.handleStale(ctx)
+				}
 				return http.StatusBadRequest, fmt.Errorf("decoding logs from the request body: %w", err)
 			}
 			// Some decoders deliver the last partial batch together with
 			// io.EOF, so it must still be forwarded.
 			if logs.LogRecordCount() > 0 {
-				if statusCode, err := c.forwardLogs(ctx, logs, commonAttributes); err != nil {
-					return statusCode, err
+				if statusCode, ferr := c.forwardTrackedLogs(ctx, decoder.Offset(), logs, session, commonAttributes); ferr != nil {
+					return statusCode, ferr
 				}
 			}
 			break
 		}
 		if logs.LogRecordCount() > 0 {
-			if statusCode, err := c.forwardLogs(ctx, logs, commonAttributes); err != nil {
-				return statusCode, err
+			if statusCode, ferr := c.forwardTrackedLogs(ctx, decoder.Offset(), logs, session, commonAttributes); ferr != nil {
+				return statusCode, ferr
 			}
 		}
+	}
+	if session != nil {
+		session.delivered(ctx)
 	}
 	return http.StatusOK, nil
 }
@@ -145,17 +169,70 @@ func (c *logsConsumer) consumeDecodedLogs(
 func (c *logsConsumer) consumeWholeBody(
 	ctx context.Context,
 	body io.Reader,
+	session *fileSession,
 	commonAttributes map[string]string,
 ) (int, error) {
 	raw, err := io.ReadAll(body)
 	if err != nil {
+		if session.stale(err) {
+			return session.handleStale(ctx)
+		}
 		return http.StatusBadRequest, err
 	}
 	logs, err := c.unmarshaler.UnmarshalLogs(raw)
 	if err != nil {
 		return http.StatusBadRequest, err
 	}
-	return c.forwardLogs(ctx, logs, commonAttributes)
+	var checkpoint int64
+	if session != nil {
+		stampFrom, cp, stampable := session.prepareWholeBody(logs.LogRecordCount())
+		if stampable {
+			stampFileLine(logs, stampFrom)
+		} else {
+			session.tracker.countLineAttrSkipped(ctx)
+		}
+		checkpoint = cp
+	}
+	if statusCode, err := c.forwardLogs(ctx, logs, commonAttributes); err != nil {
+		return statusCode, err
+	}
+	if session != nil {
+		if sc, serr := session.saveCheckpoint(ctx, checkpoint); serr != nil {
+			return sc, serr
+		}
+		session.delivered(ctx)
+	}
+	return http.StatusOK, nil
+}
+
+// forwardTrackedLogs anchors a decoded batch at the decoder's byte offset,
+// stamps file.line when the 1:1 line-to-record guard holds, forwards the
+// batch, and only then records the session checkpoint — a failed forward
+// must never advance the shared checkpoint.
+func (c *logsConsumer) forwardTrackedLogs(
+	ctx context.Context,
+	decoderOffset int64,
+	logs plog.Logs,
+	session *fileSession,
+	commonAttributes map[string]string,
+) (int, error) {
+	var checkpoint int64
+	if session != nil {
+		stampFrom, cp, stampable := session.markBatch(decoderOffset, logs.LogRecordCount())
+		if stampable {
+			stampFileLine(logs, stampFrom)
+		} else {
+			session.tracker.countLineAttrSkipped(ctx)
+		}
+		checkpoint = cp
+	}
+	if statusCode, err := c.forwardLogs(ctx, logs, commonAttributes); err != nil {
+		return statusCode, err
+	}
+	if session != nil {
+		return session.saveCheckpoint(ctx, checkpoint)
+	}
+	return http.StatusOK, nil
 }
 
 // forwardLogs attaches common attributes (if any) to each resource of a
@@ -182,4 +259,11 @@ func (c *logsConsumer) forwardLogs(
 		return http.StatusServiceUnavailable, err
 	}
 	return http.StatusOK, nil
+}
+
+// Shutdown releases the file tracking resources (safe when file tracking is
+// disabled).
+func (c *logsConsumer) Shutdown(ctx context.Context) error {
+	c.tracker.Shutdown(ctx)
+	return nil
 }

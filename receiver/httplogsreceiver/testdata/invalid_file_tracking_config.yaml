@@ -1,0 +1,7 @@
+httplogs:
+  endpoint: 0.0.0.0:4433
+  record_type: cwlogs
+  file_tracking:
+    enabled: true
+    stale_checkpoint: bogus
+    on_error: also_bogus

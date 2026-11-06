@@ -36,6 +36,9 @@ type metricsConsumer struct {
 	// unmarshaler is the configured pmetric.Unmarshaler
 	// to use when processing the records.
 	unmarshaler pmetric.Unmarshaler
+	// tracker holds the per-file delivery checkpoints of this receiver
+	// instance; it is nil when file tracking is disabled.
+	tracker *fileTracker
 }
 
 var _ httpLogsConsumer = (*metricsConsumer)(nil)
@@ -60,6 +63,12 @@ func newMetricsReceiver(
 }
 
 func (c *metricsConsumer) Start(ctx context.Context, host component.Host) error {
+	tracker, err := newFileTracker(ctx, c.config, c.settings, host)
+	if err != nil {
+		return fmt.Errorf("failed to initialize file tracking: %w", err)
+	}
+	c.tracker = tracker
+
 	encoding := c.config.Encoding
 	if encoding == "" {
 		encoding = c.config.RecordType
@@ -128,10 +137,14 @@ func (c *metricsConsumer) newUnmarshalerFromEncoding(
 // unmarshaler does not implement streaming), the whole body is unmarshalled
 // at once.
 func (c *metricsConsumer) Consume(ctx context.Context, body io.Reader, commonAttributes map[string]string) (int, error) {
+	body, session, statusCode, err := c.tracker.establish(ctx, body, commonAttributes)
+	if err != nil {
+		return statusCode, err
+	}
 	if factory, ok := c.unmarshaler.(encoding.MetricsDecoderFactory); ok {
 		decoder, err := factory.NewMetricsDecoder(body, decoderOptions(c.config)...)
 		if err == nil {
-			return c.consumeDecodedMetrics(ctx, decoder, commonAttributes)
+			return c.consumeDecodedMetrics(ctx, decoder, session, commonAttributes)
 		}
 		// The extension accepted this reader but does not stream the given
 		// format (or its stream could not be started). Buffer the body and
@@ -141,36 +154,45 @@ func (c *metricsConsumer) Consume(ctx context.Context, body io.Reader, commonAtt
 			zap.Error(err),
 		)
 	}
-	return c.consumeWholeBody(ctx, body, commonAttributes)
+	return c.consumeWholeBody(ctx, body, session, commonAttributes)
 }
 
 // consumeDecodedMetrics forwards each batch produced by a streaming decoder to
-// the next consumer as it is decoded.
+// the next consumer as it is decoded. When the request carries a file
+// tracking session, each batch is anchored at the decoder's offset and its
+// checkpoint is saved only after the batch was forwarded successfully.
 func (c *metricsConsumer) consumeDecodedMetrics(
 	ctx context.Context,
 	decoder encoding.MetricsDecoder,
+	session *fileSession,
 	commonAttributes map[string]string,
 ) (int, error) {
 	for {
 		metrics, err := decoder.DecodeMetrics()
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
+				if session.stale(err) {
+					return session.handleStale(ctx)
+				}
 				return http.StatusBadRequest, fmt.Errorf("decoding metrics from the request body: %w", err)
 			}
 			// Some decoders deliver the last partial batch together with
 			// io.EOF, so it must still be forwarded.
 			if metrics.MetricCount() > 0 {
-				if statusCode, err := c.forwardMetrics(ctx, metrics, commonAttributes); err != nil {
-					return statusCode, err
+				if statusCode, ferr := c.forwardTrackedMetrics(ctx, decoder.Offset(), metrics, session, commonAttributes); ferr != nil {
+					return statusCode, ferr
 				}
 			}
 			break
 		}
 		if metrics.MetricCount() > 0 {
-			if statusCode, err := c.forwardMetrics(ctx, metrics, commonAttributes); err != nil {
-				return statusCode, err
+			if statusCode, ferr := c.forwardTrackedMetrics(ctx, decoder.Offset(), metrics, session, commonAttributes); ferr != nil {
+				return statusCode, ferr
 			}
 		}
+	}
+	if session != nil {
+		session.delivered(ctx)
 	}
 	return http.StatusOK, nil
 }
@@ -180,17 +202,64 @@ func (c *metricsConsumer) consumeDecodedMetrics(
 func (c *metricsConsumer) consumeWholeBody(
 	ctx context.Context,
 	body io.Reader,
+	session *fileSession,
 	commonAttributes map[string]string,
 ) (int, error) {
 	raw, err := io.ReadAll(body)
 	if err != nil {
+		if session.stale(err) {
+			return session.handleStale(ctx)
+		}
 		return http.StatusBadRequest, err
 	}
 	metrics, err := c.unmarshaler.UnmarshalMetrics(raw)
 	if err != nil {
 		return http.StatusBadRequest, err
 	}
-	return c.forwardMetrics(ctx, metrics, commonAttributes)
+	var checkpoint int64
+	if session != nil {
+		_, checkpoint, _ = session.prepareWholeBody(metrics.MetricCount())
+	}
+	if statusCode, err := c.forwardMetrics(ctx, metrics, commonAttributes); err != nil {
+		return statusCode, err
+	}
+	if session != nil {
+		if sc, serr := session.saveCheckpoint(ctx, checkpoint); serr != nil {
+			return sc, serr
+		}
+		session.delivered(ctx)
+	}
+	return http.StatusOK, nil
+}
+
+// forwardTrackedMetrics anchors a decoded batch at the decoder's byte offset,
+// forwards the batch, and only then records the session checkpoint — a failed
+// forward must never advance the shared checkpoint.
+func (c *metricsConsumer) forwardTrackedMetrics(
+	ctx context.Context,
+	decoderOffset int64,
+	metrics pmetric.Metrics,
+	session *fileSession,
+	commonAttributes map[string]string,
+) (int, error) {
+	var checkpoint int64
+	if session != nil {
+		_, checkpoint, _ = session.markBatch(decoderOffset, metrics.MetricCount())
+	}
+	if statusCode, err := c.forwardMetrics(ctx, metrics, commonAttributes); err != nil {
+		return statusCode, err
+	}
+	if session != nil {
+		return session.saveCheckpoint(ctx, checkpoint)
+	}
+	return http.StatusOK, nil
+}
+
+// Shutdown releases the file tracking resources (safe when file tracking is
+// disabled).
+func (c *metricsConsumer) Shutdown(ctx context.Context) error {
+	c.tracker.Shutdown(ctx)
+	return nil
 }
 
 // forwardMetrics attaches common attributes (if any) to each resource of a

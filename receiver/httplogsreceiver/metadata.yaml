@@ -13,5 +13,72 @@ status:
   codeowners:
     active: [piffall]
 
+attributes:
+  backend:
+    description: The checkpoint store backend in use.
+    type: string
+    enum: [inmem, storage]
+  on_error:
+    description: The on_error policy in effect for the failed store operation.
+    type: string
+    enum: [degrade, fail]
+  op:
+    description: The checkpoint store operation that failed.
+    type: string
+    enum: [load, save]
+  result:
+    description: Outcome of a tracked file delivery.
+    type: string
+    enum: [fresh, resumed, stale]
+
+telemetry:
+  metrics:
+    httplogs_receiver.filetracking.errors_total:
+      enabled: true
+      description: The total number of checkpoint store operations that failed while processing a tracked file delivery.
+      extended_documentation: Only produced when file_tracking.enabled is true. A non-zero "op=save, on_error=degrade" value means checkpoints are being dropped mid-delivery. That is expected with on_error=degrade (continued untracked, at-least-once preserved), but should be investigated in scaled deployments.
+      stability: development
+      unit: "1"
+      sum:
+        value_type: int
+        monotonic: true
+      attributes: [backend, on_error, op]
+    httplogs_receiver.filetracking.line_attr_batches_skipped_total:
+      enabled: true
+      description: The total number of log batches forwarded without the file.line attribute because their record count did not match the number of source lines decoded.
+      extended_documentation: Only produced when file_tracking.enabled is true and the signal is logs. Non-zero in steady state means the configured encoding is not 1 line to 1 record for this receiver. The affected batches are still forwarded (with the file line attribute absent), and file tracking checkpointing is unaffected.
+      stability: development
+      unit: "1"
+      sum:
+        value_type: int
+        monotonic: true
+    httplogs_receiver.filetracking.resumed_files_total:
+      enabled: true
+      description: The total number of file deliveries processed with file tracking, by outcome (fresh file, resumed from a checkpoint, or stale checkpoint).
+      extended_documentation: Only produced when file_tracking.enabled is true and the delivery carries a tracked file name. A non-zero "stale" result means resent files end before their recorded checkpoint (shrunk, truncated, or a different file reusing the name).
+      stability: development
+      unit: "1"
+      sum:
+        value_type: int
+        monotonic: true
+      attributes: [result]
+    httplogs_receiver.filetracking.skipped_lines_total:
+      enabled: true
+      description: The total number of already-exported file lines skipped while resuming a tracked file delivery.
+      extended_documentation: Only produced when file_tracking.enabled is true and the delivery carries a tracked file name with an existing checkpoint. Each resumed delivery is counted for the lines of its file it skips.
+      stability: development
+      unit: "1"
+      sum:
+        value_type: int
+        monotonic: true
+    httplogs_receiver.filetracking.tracked_files:
+      enabled: true
+      description: The number of files currently tracked by the in-memory checkpoint store.
+      extended_documentation: Only produced when file_tracking.enabled is true and no storage extension is configured (the in-memory backend only). It is the capacity signal against max_tracked_files.
+      stability: development
+      unit: "1"
+      gauge:
+        value_type: int
+
 tests:
   config:

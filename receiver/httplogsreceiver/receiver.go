@@ -138,9 +138,14 @@ func (fmr *httpLogsReceiver) Start(ctx context.Context, host component.Host) err
 }
 
 // Shutdown tells the receiver that should stop reception,
-// giving it a chance to perform any necessary clean-up and
-// shutting down its HTTP server.
-func (fmr *httpLogsReceiver) Shutdown(context.Context) error {
+// giving it a chance to perform any necessary clean-up (including closing
+// the file tracking store) and shutting down its HTTP server.
+func (fmr *httpLogsReceiver) Shutdown(ctx context.Context) error {
+	if tracker, ok := fmr.consumer.(interface{ Shutdown(context.Context) error }); ok {
+		if err := tracker.Shutdown(ctx); err != nil {
+			return fmt.Errorf("failed to shut down file tracking: %w", err)
+		}
+	}
 	if fmr.server == nil {
 		return nil
 	}
@@ -228,11 +233,9 @@ func (fmr *httpLogsReceiver) validate(r *http.Request) (int, error) {
 func (*httpLogsReceiver) getCommonAttributes(r *http.Request) (map[string]string, error) {
 	attributes := make(map[string]string)
 	if commonAttributes := r.Header.Get(headerHttpCommonAttributes); commonAttributes != "" {
-		var fca httpLogsCommonAttributes
-		if err := json.Unmarshal([]byte(commonAttributes), &fca); err != nil {
+		if err := json.Unmarshal([]byte(commonAttributes), &attributes); err != nil {
 			return nil, err
 		}
-		attributes = fca.CommonAttributes
 	}
 	return attributes, nil
 }
