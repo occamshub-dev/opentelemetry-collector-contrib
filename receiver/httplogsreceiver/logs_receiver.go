@@ -179,6 +179,14 @@ func (c *logsConsumer) consumeWholeBody(
 		}
 		return http.StatusBadRequest, err
 	}
+	if session != nil && len(raw) == 0 {
+		// The delivery carries nothing beyond the file's checkpoint: the
+		// tracking reader skipped every line, so there is nothing to decode.
+		// Short-circuit instead of running an empty body through the
+		// unmarshaler, which several formats reject outright.
+		session.delivered(ctx)
+		return http.StatusOK, nil
+	}
 	logs, err := c.unmarshaler.UnmarshalLogs(raw)
 	if err != nil {
 		return http.StatusBadRequest, err

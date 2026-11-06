@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/collector/component/componenttest"
 	storage "go.opentelemetry.io/collector/extension/xextension/storage"
 	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/receiver"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -230,6 +231,29 @@ func (d *fixedOffsetLogsDecoder) DecodeLogs() (plog.Logs, error) {
 }
 
 func (d *fixedOffsetLogsDecoder) Offset() int64 { return d.offset }
+
+// emptyBodyUnmarshaler rejects an empty body the way the elbaccess
+// unmarshaler does ("invalid first ELB access log line part"), so it proves
+// when a tracked body reaches the unmarshaler at all.
+type emptyBodyUnmarshaler struct{ calls int }
+
+func (u *emptyBodyUnmarshaler) UnmarshalLogs(b []byte) (plog.Logs, error) {
+	u.calls++
+	if len(b) == 0 {
+		return plog.NewLogs(), errors.New(`invalid first ELB access log line part: `)
+	}
+	return plog.NewLogs(), nil
+}
+
+type emptyBodyMetricsUnmarshaler struct{ calls int }
+
+func (u *emptyBodyMetricsUnmarshaler) UnmarshalMetrics(b []byte) (pmetric.Metrics, error) {
+	u.calls++
+	if len(b) == 0 {
+		return pmetric.NewMetrics(), errors.New("empty metrics body")
+	}
+	return pmetric.NewMetrics(), nil
+}
 
 // newTestTelemetry returns fresh test telemetry, shut down on test cleanup.
 func newTestTelemetry(t *testing.T) *componenttest.Telemetry {
@@ -496,6 +520,88 @@ func TestConsume_ResumedDelivery(t *testing.T) {
 	// No checkpoint was saved during this request.
 	metadatatest.AssertEqualHttplogsReceiverFiletrackingTrackedFiles(t, tt,
 		[]metricdata.DataPoint[int64]{{Value: 0}}, metricdatatest.IgnoreTimestamp())
+}
+
+// emptyStreamUnmarshaler mimics the elbaccess unmarshaler as seen from the
+// receiver: the streaming factory refuses to start on an empty stream, and
+// the whole-body path rejects an empty body ("invalid first ELB access log
+// line part").
+type emptyStreamUnmarshaler struct {
+	emptyBodyUnmarshaler
+}
+
+var _ encoding.LogsDecoderFactory = (*emptyStreamUnmarshaler)(nil)
+
+func (u *emptyStreamUnmarshaler) NewLogsDecoder(r io.Reader, _ ...encoding.DecoderOption) (encoding.LogsDecoder, error) {
+	n, err := io.Copy(io.Discard, r)
+	if err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		return nil, errors.New(`invalid first ELB access log line part: `)
+	}
+	return nil, errors.New("streaming not supported")
+}
+
+func TestConsume_LogsResumedDeliveryEmptyWholeBody(t *testing.T) {
+	ctx := context.Background()
+	tt := newTestTelemetry(t)
+	ft := newTestTracker(t, FileTrackingConfig{}, tt)
+	// A previous delivery already exported all four lines of the file; the
+	// tracking reader skips them all, leaving an empty stream.
+	require.NoError(t, ft.checkpointer.Save(ctx, testFileName, 4))
+
+	u := &emptyStreamUnmarshaler{}
+	rc := &logsRecordConsumer{}
+	lc := trackedConsumer(metadatatest.NewSettings(tt), rc, u, ft)
+
+	status, err := lc.Consume(ctx, strings.NewReader(testBody), map[string]string{defaultFileAttribute: testFileName})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	require.Empty(t, rc.results, "a fully-exported file must not be re-forwarded")
+	require.Zero(t, u.calls, "the empty tracked body must not reach the unmarshaler")
+
+	// The checkpoint is unchanged.
+	base, found, lerr := ft.checkpointer.Load(ctx, testFileName)
+	require.NoError(t, lerr)
+	require.True(t, found)
+	require.Equal(t, int64(4), base)
+
+	metadatatest.AssertEqualHttplogsReceiverFiletrackingResumedFilesTotal(t, tt,
+		[]metricdata.DataPoint[int64]{{
+			Attributes: attribute.NewSet(attribute.String("result", "resumed")),
+			Value:      1,
+		}}, metricdatatest.IgnoreTimestamp())
+	metadatatest.AssertEqualHttplogsReceiverFiletrackingSkippedLinesTotal(t, tt,
+		[]metricdata.DataPoint[int64]{{Value: 4}}, metricdatatest.IgnoreTimestamp())
+}
+
+func TestConsume_MetricsResumedDeliveryEmptyWholeBody(t *testing.T) {
+	ctx := context.Background()
+	tt := newTestTelemetry(t)
+	ft := newTestTracker(t, FileTrackingConfig{}, tt)
+	require.NoError(t, ft.checkpointer.Save(ctx, testFileName, 4))
+
+	u := &emptyBodyMetricsUnmarshaler{}
+	rc := &metricsRecordConsumer{}
+	lc := &metricsConsumer{
+		config:      createDefaultConfig().(*Config),
+		settings:    metadatatest.NewSettings(tt),
+		consumer:    rc,
+		unmarshaler: u,
+		tracker:     ft,
+	}
+
+	status, err := lc.Consume(ctx, strings.NewReader(testBody), map[string]string{defaultFileAttribute: testFileName})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	require.Empty(t, rc.results)
+	require.Zero(t, u.calls, "the empty tracked body must not reach the unmarshaler")
+
+	base, found, lerr := ft.checkpointer.Load(ctx, testFileName)
+	require.NoError(t, lerr)
+	require.True(t, found)
+	require.Equal(t, int64(4), base)
 }
 
 func TestConsume_StaleCheckpoint(t *testing.T) {

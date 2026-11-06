@@ -158,6 +158,9 @@ Semantics:
   never advances the shared checkpoint.
 - Retrying after a failed delivery re-sends already-exported lines (at-least-once: possible
   duplication, never loss).
+- A resend that carries no lines beyond the recorded checkpoint is a no-op delivery: the
+  receiver responds `200 OK` without forwarding or unmarshaling anything (the already-exported
+  prefix is skipped and the checkpoint is left unchanged).
 - While file tracking is enabled, each forwarded **log** record is additionally stamped with a
   `file.line` record attribute carrying its 1-based line number within the delivered file.
   Together with the `file.path` resource attribute, records carry an absolute (file, line)
