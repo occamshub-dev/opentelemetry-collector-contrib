@@ -97,6 +97,14 @@ negative.
 `flush_items` and `flush_bytes` only take effect when the configured encoding exposes a
 streaming decoder.
 
+## Request headers
+
+In addition to the standard HTTP headers, the receiver reads the following per-request headers:
+
+- **`X-App-Name`** — the value is attached to every received record as the `service.name`
+  resource attribute (via the common attributes). If the request also sets `service.name` in
+  the `X-Common-Attributes` header, that value takes precedence.
+
 ## File tracking
 
 By default the receiver has no memory across requests: if a delivered file is resent, it is

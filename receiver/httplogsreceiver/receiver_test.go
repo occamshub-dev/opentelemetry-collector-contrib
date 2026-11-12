@@ -172,6 +172,17 @@ func TestRequest(t *testing.T) {
 			},
 			wantStatusCode: http.StatusOK,
 		},
+		"WithAppNameHeader": {
+			headers: map[string]string{
+				headerHttpAppName: "my-app",
+			},
+			body: testHttpRequest(testHttpRequestID, "test"),
+			consumer: httpLogsConsumerFunc(func(ctx context.Context, body io.Reader, common map[string]string) (int, error) {
+				require.Equal(t, "my-app", common["service.name"])
+				return http.StatusOK, nil
+			}),
+			wantStatusCode: http.StatusOK,
+		},
 	}
 	for name, testCase := range testCases {
 		t.Run(name, func(t *testing.T) {
@@ -210,6 +221,73 @@ func TestRequest(t *testing.T) {
 			} else {
 				require.Empty(t, gotResponse.ErrorMessage)
 			}
+		})
+	}
+}
+
+func TestGetCommonAttributes(t *testing.T) {
+	testCases := map[string]struct {
+		headers map[string]string
+		want    map[string]string
+		wantErr bool
+	}{
+		"WithoutAttributes": {
+			want: map[string]string{},
+		},
+		"CommonAttributesOnly": {
+			headers: map[string]string{
+				headerHttpCommonAttributes: `{"file.path":"somelocation/somefile.gz"}`,
+			},
+			want: map[string]string{"file.path": "somelocation/somefile.gz"},
+		},
+		"AppNameOnly": {
+			headers: map[string]string{
+				headerHttpAppName: "my-app",
+			},
+			want: map[string]string{"service.name": "my-app"},
+		},
+		"CommonAttributesTakePrecedence": {
+			headers: map[string]string{
+				headerHttpCommonAttributes: `{"service.name":"from-common-attributes"}`,
+				headerHttpAppName:          "my-app",
+			},
+			want: map[string]string{"service.name": "from-common-attributes"},
+		},
+		"AppNameFillsMissingServiceName": {
+			headers: map[string]string{
+				headerHttpCommonAttributes: `{"file.path":"somelocation/somefile.gz"}`,
+				headerHttpAppName:          "my-app",
+			},
+			want: map[string]string{"file.path": "somelocation/somefile.gz", "service.name": "my-app"},
+		},
+		"EmptyAppNameIgnored": {
+			headers: map[string]string{
+				headerHttpCommonAttributes: `{"service.name":"from-common-attributes"}`,
+				headerHttpAppName:          "",
+			},
+			want: map[string]string{"service.name": "from-common-attributes"},
+		},
+		"InvalidCommonAttributes": {
+			headers: map[string]string{
+				headerHttpCommonAttributes: "not-json",
+			},
+			wantErr: true,
+		},
+	}
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			r := newTestRequest(nil)
+			for k, v := range testCase.headers {
+				r.Header.Set(k, v)
+			}
+			fmr := testHttpReceiver(&Config{}, nil)
+			got, err := fmr.getCommonAttributes(r)
+			if testCase.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, testCase.want, got)
 		})
 	}
 }

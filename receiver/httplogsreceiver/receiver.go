@@ -28,6 +28,7 @@ const (
 	headerHttpRequestID        = "X-Request-Id"
 	headerHttpAccessKey        = "X-Access-Key"
 	headerHttpCommonAttributes = "X-Common-Attributes"
+	headerHttpAppName          = "X-App-Name"
 	headerContentType          = "Content-Type"
 	headerContentLength        = "Content-Length"
 	headerContentEncoding      = "Content-Encoding"
@@ -229,12 +230,19 @@ func (fmr *httpLogsReceiver) validate(r *http.Request) (int, error) {
 	return http.StatusUnauthorized, errInvalidAccessKey
 }
 
-// getCommonAttributes unmarshalls the common attributes from the request header
+// getCommonAttributes unmarshalls the common attributes from the request header.
+// A non-empty X-App-Name header is additionally injected as service.name,
+// unless the X-Common-Attributes header already provides one.
 func (*httpLogsReceiver) getCommonAttributes(r *http.Request) (map[string]string, error) {
 	attributes := make(map[string]string)
 	if commonAttributes := r.Header.Get(headerHttpCommonAttributes); commonAttributes != "" {
 		if err := json.Unmarshal([]byte(commonAttributes), &attributes); err != nil {
 			return nil, err
+		}
+	}
+	if appName := r.Header.Get(headerHttpAppName); appName != "" {
+		if _, ok := attributes["service.name"]; !ok {
+			attributes["service.name"] = appName
 		}
 	}
 	return attributes, nil
