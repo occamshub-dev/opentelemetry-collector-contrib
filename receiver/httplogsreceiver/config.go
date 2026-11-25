@@ -18,25 +18,29 @@ import (
 )
 
 const (
-	defaultFileAttribute   = "file.path"
-	staleCheckpointReject  = "reject"
-	staleCheckpointReset   = "reset"
-	onErrorPolicyDegrade   = "degrade"
-	onErrorPolicyFail      = "fail"
-	defaultEntryTTL        = 24 * time.Hour
-	defaultMaxTrackedFiles = 1000
+	defaultFileAttribute        = "file.path"
+	staleCheckpointReject       = "reject"
+	staleCheckpointReset        = "reset"
+	onErrorPolicyDegrade        = "degrade"
+	onErrorPolicyFail           = "fail"
+	concurrencyStrategyBlock    = "block"
+	concurrencyStrategyFastFail = "fast_fail"
+	defaultEntryTTL             = 24 * time.Hour
+	defaultMaxTrackedFiles      = 1000
 )
 
 var (
-	errRecordTypeEncodingSet    = errors.New("record_type must not be set when encoding is set")
-	errFlushItemsNegative       = errors.New("flush_items must not be negative")
-	errFlushBytesNegative       = errors.New("flush_bytes must not be negative")
-	errDuplicateCompressionAlgo = errors.New("compression_algorithms must not contain duplicates")
-	errFileAttributeEmpty       = errors.New("file_tracking.file_attribute must not be empty when file_tracking.enabled is set")
-	errStaleCheckpointPolicy    = fmt.Errorf("file_tracking.stale_checkpoint must be %q or %q", staleCheckpointReject, staleCheckpointReset)
-	errOnErrorPolicy            = fmt.Errorf("file_tracking.on_error must be %q or %q", onErrorPolicyDegrade, onErrorPolicyFail)
-	errEntryTTLNegative         = errors.New("file_tracking.entry_ttl must not be negative")
-	errMaxTrackedFilesNegative  = errors.New("file_tracking.max_tracked_files must not be negative")
+	errRecordTypeEncodingSet         = errors.New("record_type must not be set when encoding is set")
+	errFlushItemsNegative            = errors.New("flush_items must not be negative")
+	errFlushBytesNegative            = errors.New("flush_bytes must not be negative")
+	errDuplicateCompressionAlgo      = errors.New("compression_algorithms must not contain duplicates")
+	errFileAttributeEmpty            = errors.New("file_tracking.file_attribute must not be empty when file_tracking.enabled is set")
+	errStaleCheckpointPolicy         = fmt.Errorf("file_tracking.stale_checkpoint must be %q or %q", staleCheckpointReject, staleCheckpointReset)
+	errOnErrorPolicy                 = fmt.Errorf("file_tracking.on_error must be %q or %q", onErrorPolicyDegrade, onErrorPolicyFail)
+	errEntryTTLNegative              = errors.New("file_tracking.entry_ttl must not be negative")
+	errMaxTrackedFilesNegative       = errors.New("file_tracking.max_tracked_files must not be negative")
+	errMaxConcurrentRequestsNegative = errors.New("max_concurrent_requests must not be negative")
+	errConcurrencyStrategy           = fmt.Errorf("concurrency_strategy must be %q or %q", concurrencyStrategyBlock, concurrencyStrategyFastFail)
 )
 
 // defaultCompressionAlgorithms is the set of request body encodings
@@ -87,6 +91,19 @@ type Config struct {
 	//
 	// 0 means use the decoder default (1 MiB).
 	FlushBytes int64 `mapstructure:"flush_bytes"`
+	// MaxConcurrentRequests caps the number of requests this receiver
+	// instance processes (decompresses and decodes) concurrently. Requests
+	// beyond the cap are handled according to ConcurrencyStrategy.
+	//
+	// 0 means unlimited. Default: 0.
+	MaxConcurrentRequests int `mapstructure:"max_concurrent_requests"`
+	// ConcurrencyStrategy controls what happens when MaxConcurrentRequests
+	// is reached:
+	//   - "block" (default): excess requests wait for a free slot. Their
+	//     request body is not read while they wait.
+	//   - "fast_fail": excess requests are rejected immediately with 503 and
+	//     a Retry-After header, so the sender retries with backoff.
+	ConcurrencyStrategy string `mapstructure:"concurrency_strategy"`
 	// StorageID identifies the storage extension whose client is used to
 	// persist file tracking checkpoints (see FileTracking). Checkpoints are
 	// then shared across all replicas of the receiver.
@@ -180,6 +197,14 @@ func (c *Config) Validate() error {
 	}
 	if c.FlushBytes < 0 {
 		return errFlushBytesNegative
+	}
+	if c.MaxConcurrentRequests < 0 {
+		return errMaxConcurrentRequestsNegative
+	}
+	switch c.ConcurrencyStrategy {
+	case "", concurrencyStrategyBlock, concurrencyStrategyFastFail: // "" = unset, defaults at run time.
+	default:
+		return fmt.Errorf("%w: got %q", errConcurrencyStrategy, c.ConcurrencyStrategy)
 	}
 	seen := make(map[configcompression.Type]struct{}, len(c.CompressionAlgorithms))
 	for _, a := range c.CompressionAlgorithms {

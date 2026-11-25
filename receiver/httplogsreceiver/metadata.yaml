@@ -30,9 +30,31 @@ attributes:
     description: Outcome of a tracked file delivery.
     type: string
     enum: [fresh, resumed, stale]
+  strategy:
+    description: The concurrency strategy that rejected the request.
+    type: string
+    enum: [fast_fail]
 
 telemetry:
   metrics:
+    httplogs_receiver.concurrency.active_requests:
+      enabled: true
+      description: The number of requests currently being processed (holding a concurrency slot) by the receiver.
+      extended_documentation: Only produced when max_concurrent_requests is set. It is the utilization signal against max_concurrent_requests.
+      stability: development
+      unit: "1"
+      gauge:
+        value_type: int
+    httplogs_receiver.concurrency.requests_rejected_total:
+      enabled: true
+      description: The total number of requests rejected because max_concurrent_requests was reached.
+      extended_documentation: Only produced when max_concurrent_requests is set and concurrency_strategy is "fast_fail". Each rejection responds 503 with a Retry-After header so the sender retries with backoff.
+      stability: development
+      unit: "1"
+      sum:
+        value_type: int
+        monotonic: true
+      attributes: [strategy]
     httplogs_receiver.filetracking.errors_total:
       enabled: true
       description: The total number of checkpoint store operations that failed while processing a tracked file delivery.

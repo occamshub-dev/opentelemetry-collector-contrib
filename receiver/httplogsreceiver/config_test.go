@@ -109,6 +109,46 @@ func TestLoadConfigFileTrackingInvalid(t *testing.T) {
 	assert.ErrorIs(t, err, errStaleCheckpointPolicy)
 }
 
+func TestLoadConfigConcurrency(t *testing.T) {
+	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "concurrency_config.yaml"))
+	require.NoError(t, err)
+
+	factory := NewFactory()
+	cfg := factory.CreateDefaultConfig()
+
+	sub, err := cm.Sub(component.NewIDWithName(metadata.Type, "").String())
+	require.NoError(t, err)
+	require.NoError(t, sub.Unmarshal(cfg))
+
+	assert.NoError(t, xconfmap.Validate(cfg))
+
+	config := cfg.(*Config)
+	assert.Equal(t, 8, config.MaxConcurrentRequests)
+	assert.Equal(t, concurrencyStrategyFastFail, config.ConcurrencyStrategy)
+}
+
+func TestLoadConfigConcurrencyInvalid(t *testing.T) {
+	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "invalid_concurrency_config.yaml"))
+	require.NoError(t, err)
+
+	factory := NewFactory()
+	cfg := factory.CreateDefaultConfig()
+
+	sub, err := cm.Sub(component.NewIDWithName(metadata.Type, "").String())
+	require.NoError(t, err)
+	require.NoError(t, sub.Unmarshal(cfg))
+
+	err = xconfmap.Validate(cfg)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errConcurrencyStrategy)
+}
+
+func TestValidateMaxConcurrentRequests(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.MaxConcurrentRequests = -1
+	require.ErrorIs(t, cfg.Validate(), errMaxConcurrentRequestsNegative)
+}
+
 func TestLoadConfigInvalid(t *testing.T) {
 	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "invalid_config.yaml"))
 	require.NoError(t, err)

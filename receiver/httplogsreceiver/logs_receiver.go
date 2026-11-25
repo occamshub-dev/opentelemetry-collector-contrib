@@ -54,11 +54,7 @@ func newLogsReceiver(
 		settings: set,
 		consumer: nextConsumer,
 	}
-	return &httpLogsReceiver{
-		settings: set,
-		config:   config,
-		consumer: c,
-	}, nil
+	return newHttpLogsReceiver(set, config, c)
 }
 
 // Start sets the consumer's log unmarshaler to either a built-in

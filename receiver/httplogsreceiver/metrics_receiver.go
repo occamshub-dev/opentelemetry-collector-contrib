@@ -55,11 +55,7 @@ func newMetricsReceiver(
 		settings: set,
 		consumer: nextConsumer,
 	}
-	return &httpLogsReceiver{
-		settings: set,
-		config:   config,
-		consumer: c,
-	}, nil
+	return newHttpLogsReceiver(set, config, c)
 }
 
 func (c *metricsConsumer) Start(ctx context.Context, host component.Host) error {

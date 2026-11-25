@@ -13,7 +13,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component"
@@ -23,9 +25,13 @@ import (
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/receiver/receivertest"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata/metricdatatest"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/httplogsreceiver/internal/metadata"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/httplogsreceiver/internal/metadatatest"
 )
 
 const (
@@ -225,6 +231,237 @@ func TestRequest(t *testing.T) {
 	}
 }
 
+// blockingConsumer returns a consumer that signals on started the first
+// time it begins processing a request and blocks until release is closed.
+func blockingConsumer(started, release chan struct{}) httpLogsConsumer {
+	var once sync.Once
+	return httpLogsConsumerFunc(func(context.Context, io.Reader, map[string]string) (int, error) {
+		once.Do(func() { close(started) })
+		<-release
+		return http.StatusOK, nil
+	})
+}
+
+// waitStarted fails the test if the consumer has not started within the
+// timeout.
+func waitStarted(t *testing.T, started <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("consumer did not start in time")
+	}
+}
+
+func TestConcurrencyLimitBlock(t *testing.T) {
+	cfg := &Config{
+		MaxConcurrentRequests: 1,
+		ConcurrencyStrategy:   concurrencyStrategyBlock,
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	r := testHttpReceiver(cfg, blockingConsumer(started, release))
+
+	firstDone := make(chan struct{})
+	first := httptest.NewRecorder()
+	go func() {
+		r.ServeHTTP(first, newTestRequest([]byte("first")))
+		close(firstDone)
+	}()
+	waitStarted(t, started)
+
+	second := httptest.NewRecorder()
+	secondDone := make(chan struct{})
+	go func() {
+		r.ServeHTTP(second, newTestRequest([]byte("second")))
+		close(secondDone)
+	}()
+	select {
+	case <-secondDone:
+		t.Fatal("second request completed while the slot was still held")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first request did not complete")
+	}
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("second request did not complete after the slot was released")
+	}
+	require.Equal(t, http.StatusOK, first.Code)
+	require.Equal(t, http.StatusOK, second.Code)
+}
+
+func TestConcurrencyLimitFastFail(t *testing.T) {
+	cfg := &Config{
+		MaxConcurrentRequests: 1,
+		ConcurrencyStrategy:   concurrencyStrategyFastFail,
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	r := testHttpReceiver(cfg, blockingConsumer(started, release))
+
+	firstDone := make(chan struct{})
+	first := httptest.NewRecorder()
+	go func() {
+		r.ServeHTTP(first, newTestRequest([]byte("first")))
+		close(firstDone)
+	}()
+	waitStarted(t, started)
+
+	second := httptest.NewRecorder()
+	r.ServeHTTP(second, newTestRequest([]byte("second")))
+	require.Equal(t, http.StatusServiceUnavailable, second.Code)
+	require.Equal(t, "1", second.Header().Get("Retry-After"))
+
+	close(release)
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first request did not complete")
+	}
+	require.Equal(t, http.StatusOK, first.Code)
+}
+
+func TestConcurrencyLimitBlockCancelled(t *testing.T) {
+	cfg := &Config{
+		MaxConcurrentRequests: 1,
+		ConcurrencyStrategy:   concurrencyStrategyBlock,
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	r := testHttpReceiver(cfg, blockingConsumer(started, release))
+
+	firstDone := make(chan struct{})
+	first := httptest.NewRecorder()
+	go func() {
+		r.ServeHTTP(first, newTestRequest([]byte("first")))
+		close(firstDone)
+	}()
+	waitStarted(t, started)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	second := httptest.NewRecorder()
+	r.ServeHTTP(second, newTestRequest([]byte("second")).WithContext(ctx))
+	require.Equal(t, http.StatusServiceUnavailable, second.Code)
+
+	close(release)
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first request did not complete")
+	}
+	require.Equal(t, http.StatusOK, first.Code)
+}
+
+func TestConcurrencyUnlimited(t *testing.T) {
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	consumer := httpLogsConsumerFunc(func(context.Context, io.Reader, map[string]string) (int, error) {
+		started <- struct{}{}
+		<-release
+		return http.StatusOK, nil
+	})
+	r := testHttpReceiver(&Config{}, consumer)
+
+	first := httptest.NewRecorder()
+	second := httptest.NewRecorder()
+	firstDone := make(chan struct{})
+	secondDone := make(chan struct{})
+	go func() {
+		r.ServeHTTP(first, newTestRequest([]byte("first")))
+		close(firstDone)
+	}()
+	go func() {
+		r.ServeHTTP(second, newTestRequest([]byte("second")))
+		close(secondDone)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first request did not start")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("second request did not start; the default config must be unlimited")
+	}
+
+	close(release)
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first request did not complete")
+	}
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("second request did not complete")
+	}
+	require.Equal(t, http.StatusOK, first.Code)
+	require.Equal(t, http.StatusOK, second.Code)
+}
+
+func TestConcurrencyTelemetry(t *testing.T) {
+	tt := newTestTelemetry(t)
+	set := metadatatest.NewSettings(tt)
+	telemetry, err := metadata.NewTelemetryBuilder(set.TelemetrySettings)
+	require.NoError(t, err)
+
+	cfg := &Config{
+		MaxConcurrentRequests: 1,
+		ConcurrencyStrategy:   concurrencyStrategyFastFail,
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	r := &httpLogsReceiver{
+		settings:  set,
+		config:    cfg,
+		consumer:  blockingConsumer(started, release),
+		telemetry: telemetry,
+		slots:     make(chan struct{}, 1),
+	}
+
+	firstDone := make(chan struct{})
+	first := httptest.NewRecorder()
+	go func() {
+		r.ServeHTTP(first, newTestRequest([]byte("first")))
+		close(firstDone)
+	}()
+	waitStarted(t, started)
+	metadatatest.AssertEqualHttplogsReceiverConcurrencyActiveRequests(t, tt,
+		[]metricdata.DataPoint[int64]{{Value: 1}}, metricdatatest.IgnoreTimestamp())
+
+	for i := 0; i < 2; i++ {
+		rejected := httptest.NewRecorder()
+		r.ServeHTTP(rejected, newTestRequest([]byte("rejected")))
+		require.Equal(t, http.StatusServiceUnavailable, rejected.Code)
+	}
+	metadatatest.AssertEqualHttplogsReceiverConcurrencyRequestsRejectedTotal(t, tt,
+		[]metricdata.DataPoint[int64]{{
+			Attributes: attribute.NewSet(attribute.String("strategy", "fast_fail")),
+			Value:      2,
+		}}, metricdatatest.IgnoreTimestamp())
+
+	close(release)
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first request did not complete")
+	}
+	require.Equal(t, http.StatusOK, first.Code)
+	metadatatest.AssertEqualHttplogsReceiverConcurrencyActiveRequests(t, tt,
+		[]metricdata.DataPoint[int64]{{Value: 0}}, metricdatatest.IgnoreTimestamp())
+	require.NoError(t, r.Shutdown(context.Background()))
+}
+
 func TestGetCommonAttributes(t *testing.T) {
 	testCases := map[string]struct {
 		headers map[string]string
@@ -292,13 +529,15 @@ func TestGetCommonAttributes(t *testing.T) {
 	}
 }
 
-// testHttpReceiver is a convenience function for creating a test httpLogsReceiver
+// testHttpReceiver is a convenience function for creating a test
+// httpLogsReceiver. It uses the same wiring (slots, telemetry) as the
+// production constructors.
 func testHttpReceiver(config *Config, consumer httpLogsConsumer) *httpLogsReceiver {
-	return &httpLogsReceiver{
-		settings: receivertest.NewNopSettings(metadata.Type),
-		config:   config,
-		consumer: consumer,
+	r, err := newHttpLogsReceiver(receivertest.NewNopSettings(metadata.Type), config, consumer)
+	if err != nil {
+		panic(err)
 	}
+	return r
 }
 
 func newTestRequest(requestBody []byte) *http.Request {

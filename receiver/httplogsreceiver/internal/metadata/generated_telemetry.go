@@ -26,6 +26,8 @@ type TelemetryBuilder struct {
 	meter                                                   metric.Meter
 	mu                                                      sync.Mutex
 	registrations                                           []metric.Registration
+	HttplogsReceiverConcurrencyActiveRequests               metric.Int64Gauge
+	HttplogsReceiverConcurrencyRequestsRejectedTotal        metric.Int64Counter
 	HttplogsReceiverFiletrackingErrorsTotal                 metric.Int64Counter
 	HttplogsReceiverFiletrackingLineAttrBatchesSkippedTotal metric.Int64Counter
 	HttplogsReceiverFiletrackingResumedFilesTotal           metric.Int64Counter
@@ -62,6 +64,18 @@ func NewTelemetryBuilder(settings component.TelemetrySettings, options ...Teleme
 	}
 	builder.meter = Meter(settings)
 	var err, errs error
+	builder.HttplogsReceiverConcurrencyActiveRequests, err = builder.meter.Int64Gauge(
+		"otelcol_httplogs_receiver.concurrency.active_requests",
+		metric.WithDescription("The number of requests currently being processed (holding a concurrency slot) by the receiver. [Development]"),
+		metric.WithUnit("1"),
+	)
+	errs = errors.Join(errs, err)
+	builder.HttplogsReceiverConcurrencyRequestsRejectedTotal, err = builder.meter.Int64Counter(
+		"otelcol_httplogs_receiver.concurrency.requests_rejected_total",
+		metric.WithDescription("The total number of requests rejected because max_concurrent_requests was reached. [Development]"),
+		metric.WithUnit("1"),
+	)
+	errs = errors.Join(errs, err)
 	builder.HttplogsReceiverFiletrackingErrorsTotal, err = builder.meter.Int64Counter(
 		"otelcol_httplogs_receiver.filetracking.errors_total",
 		metric.WithDescription("The total number of checkpoint store operations that failed while processing a tracked file delivery. [Development]"),

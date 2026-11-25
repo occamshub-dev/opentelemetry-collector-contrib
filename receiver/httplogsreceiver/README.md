@@ -97,6 +97,29 @@ negative.
 `flush_items` and `flush_bytes` only take effect when the configured encoding exposes a
 streaming decoder.
 
+### max\_concurrent\_requests:
+
+The maximum number of requests this receiver instance may process (decompress and decode)
+concurrently. Requests beyond the cap are handled according to `concurrency_strategy`.
+`0` (the default) means unlimited.
+
+Setting this bounds per-request memory (decompressed body plus decoded records) to
+approximately `max_concurrent_requests` times the per-request size. It is a per-receiver
+cap; combine it with the [memory_limiter](https://github.com/open-telemetry/opentelemetry-collector/blob/main/extension/memorylimiterextension/README.md)
+extension, which applies a process-wide limit as a backstop.
+
+### concurrency\_strategy:
+
+Controls what happens when `max_concurrent_requests` is reached:
+
+- `block` (default): excess requests wait for a free slot. They are not rejected, and their
+  request body is not read while they wait. If a sender disconnects while a request is
+  waiting, the request is dropped.
+- `fast_fail`: excess requests are rejected immediately with `503 Service Unavailable` and a
+  `Retry-After` header, so well-behaved senders retry with backoff.
+
+Only takes effect when `max_concurrent_requests` is greater than `0`.
+
 ## Request headers
 
 In addition to the standard HTTP headers, the receiver reads the following per-request headers:

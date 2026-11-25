@@ -6,6 +6,32 @@
 
 The following telemetry is emitted by this component.
 
+### otelcol_httplogs_receiver.concurrency.active_requests
+
+The number of requests currently being processed (holding a concurrency slot) by the receiver.
+
+Only produced when max_concurrent_requests is set. It is the utilization signal against max_concurrent_requests.
+
+| Unit | Metric Type | Value Type | Stability |
+| ---- | ----------- | ---------- | --------- |
+| 1 | Gauge | Int | Development |
+
+### otelcol_httplogs_receiver.concurrency.requests_rejected_total
+
+The total number of requests rejected because max_concurrent_requests was reached.
+
+Only produced when max_concurrent_requests is set and concurrency_strategy is "fast_fail". Each rejection responds 503 with a Retry-After header so the sender retries with backoff.
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| 1 | Sum | Int | true | Development |
+
+#### Attributes
+
+| Name | Description | Values | Semantic Convention |
+| ---- | ----------- | ------ | ------------------- |
+| strategy | The concurrency strategy that rejected the request. | Str: ``fast_fail`` | - |
+
 ### otelcol_httplogs_receiver.filetracking.errors_total
 
 The total number of checkpoint store operations that failed while processing a tracked file delivery.

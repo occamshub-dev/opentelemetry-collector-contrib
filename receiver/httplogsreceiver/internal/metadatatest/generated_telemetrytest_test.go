@@ -19,11 +19,19 @@ func TestSetupTelemetry(t *testing.T) {
 	tb, err := metadata.NewTelemetryBuilder(testTel.NewTelemetrySettings())
 	require.NoError(t, err)
 	defer tb.Shutdown()
+	tb.HttplogsReceiverConcurrencyActiveRequests.Record(context.Background(), 1)
+	tb.HttplogsReceiverConcurrencyRequestsRejectedTotal.Add(context.Background(), 1)
 	tb.HttplogsReceiverFiletrackingErrorsTotal.Add(context.Background(), 1)
 	tb.HttplogsReceiverFiletrackingLineAttrBatchesSkippedTotal.Add(context.Background(), 1)
 	tb.HttplogsReceiverFiletrackingResumedFilesTotal.Add(context.Background(), 1)
 	tb.HttplogsReceiverFiletrackingSkippedLinesTotal.Add(context.Background(), 1)
 	tb.HttplogsReceiverFiletrackingTrackedFiles.Record(context.Background(), 1)
+	AssertEqualHttplogsReceiverConcurrencyActiveRequests(t, testTel,
+		[]metricdata.DataPoint[int64]{{Value: 1}},
+		metricdatatest.IgnoreTimestamp())
+	AssertEqualHttplogsReceiverConcurrencyRequestsRejectedTotal(t, testTel,
+		[]metricdata.DataPoint[int64]{{Value: 1}},
+		metricdatatest.IgnoreTimestamp())
 	AssertEqualHttplogsReceiverFiletrackingErrorsTotal(t, testTel,
 		[]metricdata.DataPoint[int64]{{Value: 1}},
 		metricdatatest.IgnoreTimestamp())

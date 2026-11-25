@@ -13,15 +13,19 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componentstatus"
 	"go.opentelemetry.io/collector/receiver"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/httplogsreceiver/internal/decode"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/httplogsreceiver/internal/metadata"
 )
 
 const (
@@ -32,6 +36,7 @@ const (
 	headerContentType          = "Content-Type"
 	headerContentLength        = "Content-Length"
 	headerContentEncoding      = "Content-Encoding"
+	headerRetryAfter           = "Retry-After"
 )
 
 var (
@@ -40,6 +45,7 @@ var (
 	errInHeaderMissingRequestID   = errors.New("missing request id in header")
 	errInBodyMissingRequestID     = errors.New("missing request id in body")
 	errInBodyDiffRequestID        = errors.New("different request id in body")
+	errConcurrencyLimitReached    = errors.New("max_concurrent_requests reached; try again later")
 )
 
 // The httpLogsConsumer is responsible for using the unmarshaler and the consumer.
@@ -81,6 +87,13 @@ type httpLogsReceiver struct {
 	// consumer is the httpLogsConsumer to use to process/send
 	// the records in each request.
 	consumer httpLogsConsumer
+	// slots bounds the number of requests processed concurrently;
+	// it is nil when max_concurrent_requests is 0 (unlimited).
+	slots chan struct{}
+	// active is the number of requests currently holding a slot.
+	active atomic.Int64
+	// telemetry records the receiver's own metrics.
+	telemetry *metadata.TelemetryBuilder
 }
 
 // The httpLogsResponse is the expected body for the response back to
@@ -147,6 +160,9 @@ func (fmr *httpLogsReceiver) Shutdown(ctx context.Context) error {
 			return fmt.Errorf("failed to shut down file tracking: %w", err)
 		}
 	}
+	if fmr.telemetry != nil {
+		fmr.telemetry.Shutdown()
+	}
 	if fmr.server == nil {
 		return nil
 	}
@@ -191,6 +207,17 @@ func (fmr *httpLogsReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Acquire a concurrency slot before the body is decompressed and
+	// decoded: the cap bounds how many requests may hold decoded data at
+	// once. Waiting or rejected requests never read the body, so their
+	// bytes stay on the wire (TCP backpressure applies to the sender).
+	if fmr.slots != nil {
+		if !fmr.acquireSlot(ctx, w, requestID) {
+			return
+		}
+		defer fmr.releaseSlot()
+	}
+
 	body, err := decode.ReaderFor(r.Body, contentEncoding)
 	if err != nil {
 		fmr.settings.Logger.Error(
@@ -215,6 +242,93 @@ func (fmr *httpLogsReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fmr.sendResponse(w, requestID, http.StatusOK, nil)
+}
+
+// newHttpLogsReceiver builds the shared HTTP receiver around a signal
+// consumer, wiring the concurrency limiter and telemetry from the config.
+func newHttpLogsReceiver(set receiver.Settings, config *Config, consumer httpLogsConsumer) (*httpLogsReceiver, error) {
+	telemetry, err := metadata.NewTelemetryBuilder(set.TelemetrySettings)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create receiver telemetry: %w", err)
+	}
+	r := &httpLogsReceiver{
+		settings:  set,
+		config:    config,
+		consumer:  consumer,
+		telemetry: telemetry,
+	}
+	if limit := config.MaxConcurrentRequests; limit > 0 {
+		r.slots = make(chan struct{}, limit)
+	}
+	return r, nil
+}
+
+// acquireSlot takes one concurrency slot for this request, waiting for a
+// free slot when concurrency_strategy is "block" and failing fast when it is
+// "fast_fail". It reports whether the slot was acquired; a failed
+// acquisition has already responded to the sender.
+func (fmr *httpLogsReceiver) acquireSlot(ctx context.Context, w http.ResponseWriter, requestID string) bool {
+	if fmr.config.ConcurrencyStrategy == concurrencyStrategyFastFail {
+		select {
+		case <-ctx.Done():
+			fmr.sendResponse(w, requestID, http.StatusServiceUnavailable, ctx.Err())
+			return false
+		default:
+		}
+		select {
+		case fmr.slots <- struct{}{}:
+			fmr.recordActive(+1)
+			return true
+		default:
+			fmr.settings.Logger.Info(
+				"Rejecting request: max_concurrent_requests reached (concurrency_strategy=fast_fail)",
+				zap.String("RequestID", requestID),
+			)
+			w.Header().Set(headerRetryAfter, "1")
+			fmr.sendResponse(w, requestID, http.StatusServiceUnavailable, errConcurrencyLimitReached)
+			fmr.countRejected()
+			return false
+		}
+	}
+	select {
+	case fmr.slots <- struct{}{}:
+	case <-ctx.Done():
+		fmr.settings.Logger.Info(
+			"Request cancelled while waiting for a concurrency slot",
+			zap.String("RequestID", requestID),
+		)
+		fmr.sendResponse(w, requestID, http.StatusServiceUnavailable, ctx.Err())
+		return false
+	}
+	fmr.recordActive(+1)
+	return true
+}
+
+// releaseSlot frees the slot held by this request and refreshes the
+// active_requests gauge.
+func (fmr *httpLogsReceiver) releaseSlot() {
+	<-fmr.slots
+	fmr.recordActive(-1)
+}
+
+// recordActive updates the active_requests gauge after a slot transition.
+// It records on context.Background(): the gauge reflects receiver state and
+// must not be tied to the lifetime of a (possibly cancelled) request.
+func (fmr *httpLogsReceiver) recordActive(delta int64) {
+	fmr.active.Add(delta)
+	if fmr.telemetry != nil {
+		fmr.telemetry.HttplogsReceiverConcurrencyActiveRequests.Record(context.Background(), fmr.active.Load())
+	}
+}
+
+// countRejected counts a request rejected by concurrency_strategy=fast_fail.
+func (fmr *httpLogsReceiver) countRejected() {
+	if fmr.telemetry == nil {
+		return
+	}
+	fmr.telemetry.HttplogsReceiverConcurrencyRequestsRejectedTotal.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("strategy", concurrencyStrategyFastFail),
+	))
 }
 
 // validate checks the access key in the header against
