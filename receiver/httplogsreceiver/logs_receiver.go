@@ -9,15 +9,21 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync/atomic"
+	"time"
 
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/consumer/consumererror"
+	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/receiver"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/httplogsreceiver/internal/metadata"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/httplogsreceiver/internal/unmarshaler/cwlog"
 )
 
@@ -37,7 +43,9 @@ type logsConsumer struct {
 	unmarshaler plog.Unmarshaler
 	// tracker holds the per-file delivery checkpoints of this receiver
 	// instance; it is nil when file tracking is disabled.
-	tracker *fileTracker
+	tracker   *fileTracker
+	telemetry *metadata.TelemetryBuilder
+	newest    atomic.Int64
 }
 
 var _ httpLogsConsumer = (*logsConsumer)(nil)
@@ -103,6 +111,9 @@ func (c *logsConsumer) Consume(ctx context.Context, body io.Reader, commonAttrib
 	if err != nil {
 		return statusCode, err
 	}
+	if session != nil {
+		session.telemetry = c.telemetry
+	}
 	if factory, ok := c.unmarshaler.(encoding.LogsDecoderFactory); ok {
 		decoder, err := factory.NewLogsDecoder(body, decoderOptions(c.config)...)
 		if err == nil {
@@ -134,6 +145,7 @@ func (c *logsConsumer) consumeDecodedLogs(
 		logs, err := decoder.DecodeLogs()
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
+				c.recordUnparseable()
 				if session.stale(err) {
 					return session.handleStale(ctx)
 				}
@@ -185,8 +197,10 @@ func (c *logsConsumer) consumeWholeBody(
 	}
 	logs, err := c.unmarshaler.UnmarshalLogs(raw)
 	if err != nil {
+		c.recordUnparseable()
 		return http.StatusBadRequest, err
 	}
+	c.recordLinesRead(session, logs.LogRecordCount())
 	var checkpoint int64
 	if session != nil {
 		stampFrom, cp, stampable := session.prepareWholeBody(logs.LogRecordCount())
@@ -201,6 +215,7 @@ func (c *logsConsumer) consumeWholeBody(
 		return statusCode, err
 	}
 	if session != nil {
+		session.forwarded = true
 		if sc, serr := session.saveCheckpoint(ctx, checkpoint); serr != nil {
 			return sc, serr
 		}
@@ -230,10 +245,12 @@ func (c *logsConsumer) forwardTrackedLogs(
 		}
 		checkpoint = cp
 	}
+	c.recordLinesRead(session, logs.LogRecordCount())
 	if statusCode, err := c.forwardLogs(ctx, logs, commonAttributes); err != nil {
 		return statusCode, err
 	}
 	if session != nil {
+		session.forwarded = true
 		return session.saveCheckpoint(ctx, checkpoint)
 	}
 	return http.StatusOK, nil
@@ -246,9 +263,19 @@ func (c *logsConsumer) forwardLogs(
 	logs plog.Logs,
 	commonAttributes map[string]string,
 ) (int, error) {
-	if commonAttributes != nil {
-		for i := 0; i < logs.ResourceLogs().Len(); i++ {
-			rm := logs.ResourceLogs().At(i)
+	var newest pcommon.Timestamp
+	for i := 0; i < logs.ResourceLogs().Len(); i++ {
+		rm := logs.ResourceLogs().At(i)
+		for j := 0; j < rm.ScopeLogs().Len(); j++ {
+			scopeLogs := rm.ScopeLogs().At(j)
+			for k := 0; k < scopeLogs.LogRecords().Len(); k++ {
+				timestamp := scopeLogs.LogRecords().At(k).Timestamp()
+				if timestamp > newest {
+					newest = timestamp
+				}
+			}
+		}
+		if commonAttributes != nil {
 			for k, v := range commonAttributes {
 				if _, found := rm.Resource().Attributes().Get(k); !found {
 					rm.Resource().Attributes().PutStr(k, v)
@@ -256,13 +283,72 @@ func (c *logsConsumer) forwardLogs(
 			}
 		}
 	}
+	records := int64(logs.LogRecordCount())
 	if err := c.consumer.ConsumeLogs(ctx, logs); err != nil {
 		if consumererror.IsPermanent(err) {
+			c.recordExport(records, "failed")
 			return http.StatusBadRequest, err
 		}
+		c.recordExport(records, "retried")
 		return http.StatusServiceUnavailable, err
 	}
+	c.recordExport(records, "sent")
+	c.recordFreshness(newest)
 	return http.StatusOK, nil
+}
+
+func (c *logsConsumer) setTelemetry(telemetry *metadata.TelemetryBuilder) {
+	c.telemetry = telemetry
+}
+
+func (c *logsConsumer) recordLinesRead(session *fileSession, records int) {
+	if c.telemetry == nil || records == 0 {
+		return
+	}
+	count := int64(records)
+	if session != nil && session.lastBatchLineCount > 0 {
+		count = session.lastBatchLineCount
+	}
+	c.telemetry.HttplogsReceiverLogsLinesReadTotal.Add(context.Background(), count)
+}
+
+func (c *logsConsumer) recordUnparseable() {
+	if c.telemetry != nil {
+		c.telemetry.HttplogsReceiverLogsLinesUnparseableTotal.Add(context.Background(), 1)
+	}
+}
+
+func (c *logsConsumer) recordExport(records int64, result string) {
+	if c.telemetry == nil || records == 0 {
+		return
+	}
+	c.telemetry.HttplogsReceiverLogsExportsTotal.Add(context.Background(), records, metric.WithAttributes(
+		attribute.String("log_export_result", result),
+	))
+}
+
+func (c *logsConsumer) recordFreshness(newest pcommon.Timestamp) {
+	if c.telemetry == nil {
+		return
+	}
+	if newest == 0 {
+		return
+	}
+	newestNanos := int64(newest)
+	for {
+		previous := c.newest.Load()
+		if newestNanos <= previous {
+			return
+		}
+		if c.newest.CompareAndSwap(previous, newestNanos) {
+			break
+		}
+	}
+	age := time.Since(time.Unix(0, newestNanos)).Seconds()
+	if age < 0 {
+		age = 0
+	}
+	c.telemetry.HttplogsReceiverLogsFreshness.Record(context.Background(), age)
 }
 
 // Shutdown releases the file tracking resources (safe when file tracking is

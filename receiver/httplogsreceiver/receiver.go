@@ -57,6 +57,21 @@ type httpLogsConsumer interface {
 	Consume(ctx context.Context, body io.Reader, commonAttributes map[string]string) (int, error)
 }
 
+type telemetryAwareConsumer interface {
+	setTelemetry(*metadata.TelemetryBuilder)
+}
+
+type requestOutcome struct {
+	duplicate bool
+}
+
+type requestOutcomeContextKey struct{}
+
+func requestOutcomeFromContext(ctx context.Context) *requestOutcome {
+	outcome, _ := ctx.Value(requestOutcomeContextKey{}).(*requestOutcome)
+	return outcome
+}
+
 // decoderOptions returns the decoder flush options derived from the receiver
 // config for use with streaming decoders. Unset (0) values are intentionally
 // not forwarded: 0 would disable the corresponding flush criterion, and the
@@ -175,6 +190,8 @@ func (fmr *httpLogsReceiver) Shutdown(ctx context.Context) error {
 // which is responsible for unmarshalling the records and sending them to the next consumer.
 func (fmr *httpLogsReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	outcome := &requestOutcome{}
+	ctx = context.WithValue(ctx, requestOutcomeContextKey{}, outcome)
 
 	requestID := r.Header.Get(headerHttpRequestID)
 	fmr.settings.Logger.Debug("Processing request", zap.String("RequestID", requestID))
@@ -185,6 +202,7 @@ func (fmr *httpLogsReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			zap.Error(err),
 		)
 		fmr.sendResponse(w, requestID, statusCode, err)
+		fmr.recordRequest("rejected", "invalid_access_key")
 		return
 	}
 
@@ -204,6 +222,7 @@ func (fmr *httpLogsReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			zap.Error(err),
 		)
 		fmr.sendResponse(w, requestID, http.StatusBadRequest, err)
+		fmr.recordRequest("rejected", "unsupported_content_encoding")
 		return
 	}
 
@@ -225,6 +244,7 @@ func (fmr *httpLogsReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			zap.Error(err),
 		)
 		fmr.sendResponse(w, requestID, http.StatusBadRequest, err)
+		fmr.recordRequest("rejected", "decompression")
 		return
 	}
 	if closer, ok := body.(io.Closer); ok {
@@ -239,7 +259,19 @@ func (fmr *httpLogsReceiver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			zap.Error(err),
 		)
 		fmr.sendResponse(w, requestID, statusCode, err)
+		if statusCode == http.StatusServiceUnavailable {
+			fmr.recordRequest("rejected", "upstream_retry")
+		} else if statusCode >= http.StatusInternalServerError {
+			fmr.recordRequest("rejected", "processing_error")
+		} else {
+			fmr.recordRequest("rejected", "invalid_payload")
+		}
 		return
+	}
+	if outcome.duplicate {
+		fmr.recordRequest("duplicate", "file_already_processed")
+	} else {
+		fmr.recordRequest("accepted", "success")
 	}
 	fmr.sendResponse(w, requestID, http.StatusOK, nil)
 }
@@ -257,6 +289,9 @@ func newHttpLogsReceiver(set receiver.Settings, config *Config, consumer httpLog
 		consumer:  consumer,
 		telemetry: telemetry,
 	}
+	if telemetryConsumer, ok := consumer.(telemetryAwareConsumer); ok {
+		telemetryConsumer.setTelemetry(telemetry)
+	}
 	if limit := config.MaxConcurrentRequests; limit > 0 {
 		r.slots = make(chan struct{}, limit)
 	}
@@ -272,6 +307,7 @@ func (fmr *httpLogsReceiver) acquireSlot(ctx context.Context, w http.ResponseWri
 		select {
 		case <-ctx.Done():
 			fmr.sendResponse(w, requestID, http.StatusServiceUnavailable, ctx.Err())
+			fmr.recordRequest("rejected", "cancelled")
 			return false
 		default:
 		}
@@ -287,6 +323,7 @@ func (fmr *httpLogsReceiver) acquireSlot(ctx context.Context, w http.ResponseWri
 			w.Header().Set(headerRetryAfter, "1")
 			fmr.sendResponse(w, requestID, http.StatusServiceUnavailable, errConcurrencyLimitReached)
 			fmr.countRejected()
+			fmr.recordRequest("rejected", "concurrency_limit")
 			return false
 		}
 	}
@@ -298,6 +335,7 @@ func (fmr *httpLogsReceiver) acquireSlot(ctx context.Context, w http.ResponseWri
 			zap.String("RequestID", requestID),
 		)
 		fmr.sendResponse(w, requestID, http.StatusServiceUnavailable, ctx.Err())
+		fmr.recordRequest("rejected", "cancelled")
 		return false
 	}
 	fmr.recordActive(+1)
@@ -328,6 +366,16 @@ func (fmr *httpLogsReceiver) countRejected() {
 	}
 	fmr.telemetry.HttplogsReceiverConcurrencyRequestsRejectedTotal.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.String("strategy", concurrencyStrategyFastFail),
+	))
+}
+
+func (fmr *httpLogsReceiver) recordRequest(state, reason string) {
+	if fmr.telemetry == nil {
+		return
+	}
+	fmr.telemetry.HttplogsReceiverRequestsTotal.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("request_state", state),
+		attribute.String("request_reason", reason),
 	))
 }
 

@@ -123,10 +123,14 @@ type fileSession struct {
 	// lines, then records the position of every newline it passes through.
 	reader *track.Reader
 
-	linesSoFar    int64 // lines of the post-skip stream consumed by batches processed so far
-	anchorLost    bool  // the decoder offset cannot be anchored to the stream; see markBatch
-	anchorWarned  bool
-	skipAccounted bool // the skipped_lines_total metric has been accounted for this session
+	linesSoFar         int64 // lines of the post-skip stream consumed by batches processed so far
+	anchorLost         bool  // the decoder offset cannot be anchored to the stream; see markBatch
+	anchorWarned       bool
+	skipAccounted      bool // the skipped_lines_total metric has been accounted for this session
+	forwarded          bool // at least one decoded batch was forwarded successfully
+	telemetry          *metadata.TelemetryBuilder
+	lastBatchLineCount int64 // source lines represented by the most recently marked batch
+	outcome            *requestOutcome
 }
 
 // establish resolves the file name of the delivery from the request's common
@@ -169,7 +173,13 @@ func (ft *fileTracker) establish(ctx context.Context, body io.Reader, commonAttr
 		return body, nil, 0, nil
 	}
 
-	session := &fileSession{tracker: ft, name: name, base: base, reader: track.NewReader(body, base)}
+	session := &fileSession{
+		tracker: ft,
+		name:    name,
+		base:    base,
+		reader:  track.NewReader(body, base),
+		outcome: requestOutcomeFromContext(ctx),
+	}
 	if found {
 		ft.logger.Debug(
 			"Resuming tracked file from its last exported line",
@@ -199,6 +209,7 @@ func (s *fileSession) markBatch(offset int64, records int) (stampFrom, checkpoin
 	before := s.linesSoFar
 	lines, anchored := s.reader.LineCount(offset)
 	if !anchored {
+		s.lastBatchLineCount = 0
 		s.anchorLost = true
 		if !s.anchorWarned {
 			s.anchorWarned = true
@@ -212,6 +223,7 @@ func (s *fileSession) markBatch(offset int64, records int) (stampFrom, checkpoin
 		return 0, 0, false
 	}
 	s.linesSoFar = lines
+	s.lastBatchLineCount = lines - before
 	stampable = int64(records) == lines-before
 	if !stampable {
 		s.tracker.logger.Debug(
@@ -230,6 +242,7 @@ func (s *fileSession) markBatch(offset int64, records int) (stampFrom, checkpoin
 func (s *fileSession) prepareWholeBody(records int) (stampFrom, checkpoint int64, stampable bool) {
 	total, anchored := s.reader.LineCount(s.reader.Seen())
 	if !anchored {
+		s.lastBatchLineCount = 0
 		s.anchorLost = true
 		if !s.anchorWarned {
 			s.anchorWarned = true
@@ -242,6 +255,7 @@ func (s *fileSession) prepareWholeBody(records int) (stampFrom, checkpoint int64
 		return 0, 0, false
 	}
 	s.linesSoFar = total
+	s.lastBatchLineCount = total
 	stampable = int64(records) == total
 	return s.base + 1, s.base + total, stampable
 }
@@ -333,6 +347,9 @@ func (s *fileSession) countSkipped(ctx context.Context) {
 	}
 	s.skipAccounted = true
 	s.tracker.telemetry.HttplogsReceiverFiletrackingSkippedLinesTotal.Add(ctx, s.base)
+	if s.telemetry != nil {
+		s.telemetry.HttplogsReceiverLogsLinesSkippedTotal.Add(context.Background(), s.base)
+	}
 }
 
 // markOutcome records the outcome of a fully successful delivery.
@@ -349,6 +366,9 @@ func (s *fileSession) markOutcome(ctx context.Context) {
 // delivered is called on the 200 path once a tracked delivery has completed.
 func (s *fileSession) delivered(ctx context.Context) {
 	s.countSkipped(ctx)
+	if s.outcome != nil && s.base > 0 && !s.forwarded {
+		s.outcome.duplicate = true
+	}
 	s.markOutcome(ctx)
 }
 

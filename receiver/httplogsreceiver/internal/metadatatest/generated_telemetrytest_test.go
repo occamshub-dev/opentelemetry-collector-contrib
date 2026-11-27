@@ -26,6 +26,12 @@ func TestSetupTelemetry(t *testing.T) {
 	tb.HttplogsReceiverFiletrackingResumedFilesTotal.Add(context.Background(), 1)
 	tb.HttplogsReceiverFiletrackingSkippedLinesTotal.Add(context.Background(), 1)
 	tb.HttplogsReceiverFiletrackingTrackedFiles.Record(context.Background(), 1)
+	tb.HttplogsReceiverLogsExportsTotal.Add(context.Background(), 1)
+	tb.HttplogsReceiverLogsFreshness.Record(context.Background(), 1)
+	tb.HttplogsReceiverLogsLinesReadTotal.Add(context.Background(), 1)
+	tb.HttplogsReceiverLogsLinesSkippedTotal.Add(context.Background(), 1)
+	tb.HttplogsReceiverLogsLinesUnparseableTotal.Add(context.Background(), 1)
+	tb.HttplogsReceiverRequestsTotal.Add(context.Background(), 1)
 	AssertEqualHttplogsReceiverConcurrencyActiveRequests(t, testTel,
 		[]metricdata.DataPoint[int64]{{Value: 1}},
 		metricdatatest.IgnoreTimestamp())
@@ -45,6 +51,24 @@ func TestSetupTelemetry(t *testing.T) {
 		[]metricdata.DataPoint[int64]{{Value: 1}},
 		metricdatatest.IgnoreTimestamp())
 	AssertEqualHttplogsReceiverFiletrackingTrackedFiles(t, testTel,
+		[]metricdata.DataPoint[int64]{{Value: 1}},
+		metricdatatest.IgnoreTimestamp())
+	AssertEqualHttplogsReceiverLogsExportsTotal(t, testTel,
+		[]metricdata.DataPoint[int64]{{Value: 1}},
+		metricdatatest.IgnoreTimestamp())
+	AssertEqualHttplogsReceiverLogsFreshness(t, testTel,
+		[]metricdata.DataPoint[float64]{{Value: 1}},
+		metricdatatest.IgnoreTimestamp())
+	AssertEqualHttplogsReceiverLogsLinesReadTotal(t, testTel,
+		[]metricdata.DataPoint[int64]{{Value: 1}},
+		metricdatatest.IgnoreTimestamp())
+	AssertEqualHttplogsReceiverLogsLinesSkippedTotal(t, testTel,
+		[]metricdata.DataPoint[int64]{{Value: 1}},
+		metricdatatest.IgnoreTimestamp())
+	AssertEqualHttplogsReceiverLogsLinesUnparseableTotal(t, testTel,
+		[]metricdata.DataPoint[int64]{{Value: 1}},
+		metricdatatest.IgnoreTimestamp())
+	AssertEqualHttplogsReceiverRequestsTotal(t, testTel,
 		[]metricdata.DataPoint[int64]{{Value: 1}},
 		metricdatatest.IgnoreTimestamp())
 

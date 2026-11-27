@@ -95,3 +95,74 @@ Only produced when file_tracking.enabled is true and no storage extension is con
 | Unit | Metric Type | Value Type | Stability |
 | ---- | ----------- | ---------- | --------- |
 | 1 | Gauge | Int | Development |
+
+### otelcol_httplogs_receiver.logs.exports_total
+
+The total number of decoded log records handed to the downstream consumer, by export outcome.
+
+Sent counts records accepted by the downstream consumer. Failed counts permanent downstream failures. Retried counts retryable downstream failures; the receiver itself does not retry, but returns a retryable HTTP response to the sender.
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| 1 | Sum | Int | true | Development |
+
+#### Attributes
+
+| Name | Description | Values | Semantic Convention |
+| ---- | ----------- | ------ | ------------------- |
+| log_export_result | The outcome of forwarding decoded log records to the downstream consumer. | Str: ``sent``, ``failed``, ``retried`` | - |
+
+### otelcol_httplogs_receiver.logs.freshness
+
+The age in seconds of the newest successfully exported log record at the time it was processed.
+
+The gauge is updated when a newer log timestamp is successfully exported. The receiver has no balancer identity in its protocol, so the metric is scoped to this receiver instance.
+
+| Unit | Metric Type | Value Type | Stability |
+| ---- | ----------- | ---------- | --------- |
+| s | Gauge | Double | Development |
+
+### otelcol_httplogs_receiver.logs.lines_read_total
+
+The total number of decoded log records read from HTTP requests.
+
+For file-tracked requests, this counts source lines observed by the tracking reader. For other requests, it counts decoded log records because the receiver cannot assume that an arbitrary encoding is line-oriented.
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| 1 | Sum | Int | true | Development |
+
+### otelcol_httplogs_receiver.logs.lines_skipped_total
+
+The total number of log lines skipped because they were already exported by file tracking.
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| 1 | Sum | Int | true | Development |
+
+### otelcol_httplogs_receiver.logs.lines_unparseable_total
+
+The total number of log decode failures.
+
+A decode failure is counted once per failed decoder or whole-body decode operation because arbitrary encoding extensions do not expose a per-line failure count.
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| 1 | Sum | Int | true | Development |
+
+### otelcol_httplogs_receiver.requests_total
+
+The total number of HTTP requests handled by the receiver, by outcome and reason.
+
+Accepted includes successfully processed requests. Duplicate is a tracked file resend for which every line was already exported. Rejected includes validation, decoding, cancellation, and downstream failures.
+
+| Unit | Metric Type | Value Type | Monotonic | Stability |
+| ---- | ----------- | ---------- | --------- | --------- |
+| 1 | Sum | Int | true | Development |
+
+#### Attributes
+
+| Name | Description | Values | Semantic Convention |
+| ---- | ----------- | ------ | ------------------- |
+| request_state | The outcome of an HTTP request. | Str: ``accepted``, ``duplicate``, ``rejected`` | - |
+| request_reason | The low-cardinality reason for the HTTP request outcome. | Str: ``success``, ``file_already_processed``, ``invalid_access_key``, ``unsupported_content_encoding``, ``concurrency_limit``, ``cancelled``, ``decompression``, ``invalid_payload``, ``processing_error``, ``upstream_retry`` | - |
