@@ -12,12 +12,14 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componenttest"
 	storage "go.opentelemetry.io/collector/extension/xextension/storage"
+	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/receiver"
@@ -27,6 +29,7 @@ import (
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/encoding"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/httplogsreceiver/internal/filetracker"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/httplogsreceiver/internal/metadata"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/httplogsreceiver/internal/metadatatest"
 )
 
@@ -520,6 +523,53 @@ func TestConsume_ResumedDelivery(t *testing.T) {
 	// No checkpoint was saved during this request.
 	metadatatest.AssertEqualHttplogsReceiverFiletrackingTrackedFiles(t, tt,
 		[]metricdata.DataPoint[int64]{{Value: 0}}, metricdatatest.IgnoreTimestamp())
+}
+
+func TestLogsTelemetry(t *testing.T) {
+	ctx := context.Background()
+	tt := newTestTelemetry(t)
+	ft := newTestTracker(t, FileTrackingConfig{}, tt)
+	rc := &logsRecordConsumer{}
+	lc := trackedConsumer(metadatatest.NewSettings(tt), rc, &lineLogsDecoderFactory{}, ft)
+	telemetry, err := metadata.NewTelemetryBuilder(metadatatest.NewSettings(tt).TelemetrySettings)
+	require.NoError(t, err)
+	lc.setTelemetry(telemetry)
+
+	status, err := lc.Consume(ctx, strings.NewReader(testBody), map[string]string{defaultFileAttribute: testFileName})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	metadatatest.AssertEqualHttplogsReceiverLogsLinesReadTotal(t, tt,
+		[]metricdata.DataPoint[int64]{{Value: 4}}, metricdatatest.IgnoreTimestamp())
+	metadatatest.AssertEqualHttplogsReceiverLogsExportsTotal(t, tt,
+		[]metricdata.DataPoint[int64]{{
+			Attributes: attribute.NewSet(attribute.String("log_export_result", "sent")),
+			Value:      4,
+		}}, metricdatatest.IgnoreTimestamp())
+
+	status, err = lc.Consume(ctx, strings.NewReader(testBody), map[string]string{defaultFileAttribute: testFileName})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+	metadatatest.AssertEqualHttplogsReceiverLogsLinesSkippedTotal(t, tt,
+		[]metricdata.DataPoint[int64]{{Value: 4}}, metricdatatest.IgnoreTimestamp())
+}
+
+func TestLogsTelemetryFreshness(t *testing.T) {
+	tt := newTestTelemetry(t)
+	set := metadatatest.NewSettings(tt)
+	telemetry, err := metadata.NewTelemetryBuilder(set.TelemetrySettings)
+	require.NoError(t, err)
+	lc := &logsConsumer{telemetry: telemetry}
+	logs := plog.NewLogs()
+	record := logs.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+	record.SetTimestamp(pcommon.NewTimestampFromTime(time.Now().Add(-time.Second)))
+
+	lc.recordFreshness(record.Timestamp())
+	metric, err := tt.GetMetric("otelcol_httplogs_receiver.logs.freshness")
+	require.NoError(t, err)
+	freshness, ok := metric.Data.(metricdata.Gauge[float64])
+	require.True(t, ok)
+	require.Len(t, freshness.DataPoints, 1)
+	assert.GreaterOrEqual(t, freshness.DataPoints[0].Value, 1.0)
 }
 
 // emptyStreamUnmarshaler mimics the elbaccess unmarshaler as seen from the

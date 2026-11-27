@@ -33,6 +33,12 @@ type TelemetryBuilder struct {
 	HttplogsReceiverFiletrackingResumedFilesTotal           metric.Int64Counter
 	HttplogsReceiverFiletrackingSkippedLinesTotal           metric.Int64Counter
 	HttplogsReceiverFiletrackingTrackedFiles                metric.Int64Gauge
+	HttplogsReceiverLogsExportsTotal                        metric.Int64Counter
+	HttplogsReceiverLogsFreshness                           metric.Float64Gauge
+	HttplogsReceiverLogsLinesReadTotal                      metric.Int64Counter
+	HttplogsReceiverLogsLinesSkippedTotal                   metric.Int64Counter
+	HttplogsReceiverLogsLinesUnparseableTotal               metric.Int64Counter
+	HttplogsReceiverRequestsTotal                           metric.Int64Counter
 }
 
 // TelemetryBuilderOption applies changes to default builder.
@@ -103,6 +109,42 @@ func NewTelemetryBuilder(settings component.TelemetrySettings, options ...Teleme
 	builder.HttplogsReceiverFiletrackingTrackedFiles, err = builder.meter.Int64Gauge(
 		"otelcol_httplogs_receiver.filetracking.tracked_files",
 		metric.WithDescription("The number of files currently tracked by the in-memory checkpoint store. [Development]"),
+		metric.WithUnit("1"),
+	)
+	errs = errors.Join(errs, err)
+	builder.HttplogsReceiverLogsExportsTotal, err = builder.meter.Int64Counter(
+		"otelcol_httplogs_receiver.logs.exports_total",
+		metric.WithDescription("The total number of decoded log records handed to the downstream consumer, by export outcome. [Development]"),
+		metric.WithUnit("1"),
+	)
+	errs = errors.Join(errs, err)
+	builder.HttplogsReceiverLogsFreshness, err = builder.meter.Float64Gauge(
+		"otelcol_httplogs_receiver.logs.freshness",
+		metric.WithDescription("The age in seconds of the newest successfully exported log record at the time it was processed. [Development]"),
+		metric.WithUnit("s"),
+	)
+	errs = errors.Join(errs, err)
+	builder.HttplogsReceiverLogsLinesReadTotal, err = builder.meter.Int64Counter(
+		"otelcol_httplogs_receiver.logs.lines_read_total",
+		metric.WithDescription("The total number of decoded log records read from HTTP requests. [Development]"),
+		metric.WithUnit("1"),
+	)
+	errs = errors.Join(errs, err)
+	builder.HttplogsReceiverLogsLinesSkippedTotal, err = builder.meter.Int64Counter(
+		"otelcol_httplogs_receiver.logs.lines_skipped_total",
+		metric.WithDescription("The total number of log lines skipped because they were already exported by file tracking. [Development]"),
+		metric.WithUnit("1"),
+	)
+	errs = errors.Join(errs, err)
+	builder.HttplogsReceiverLogsLinesUnparseableTotal, err = builder.meter.Int64Counter(
+		"otelcol_httplogs_receiver.logs.lines_unparseable_total",
+		metric.WithDescription("The total number of log decode failures. [Development]"),
+		metric.WithUnit("1"),
+	)
+	errs = errors.Join(errs, err)
+	builder.HttplogsReceiverRequestsTotal, err = builder.meter.Int64Counter(
+		"otelcol_httplogs_receiver.requests_total",
+		metric.WithDescription("The total number of HTTP requests handled by the receiver, by outcome and reason. [Development]"),
 		metric.WithUnit("1"),
 	)
 	errs = errors.Join(errs, err)

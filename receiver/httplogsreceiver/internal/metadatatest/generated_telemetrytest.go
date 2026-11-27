@@ -128,3 +128,97 @@ func AssertEqualHttplogsReceiverFiletrackingTrackedFiles(t *testing.T, tt *compo
 	require.NoError(t, err)
 	metricdatatest.AssertEqual(t, want, got, opts...)
 }
+
+func AssertEqualHttplogsReceiverLogsExportsTotal(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
+	want := metricdata.Metrics{
+		Name:        "otelcol_httplogs_receiver.logs.exports_total",
+		Description: "The total number of decoded log records handed to the downstream consumer, by export outcome. [Development]",
+		Unit:        "1",
+		Data: metricdata.Sum[int64]{
+			Temporality: metricdata.CumulativeTemporality,
+			IsMonotonic: true,
+			DataPoints:  dps,
+		},
+	}
+	got, err := tt.GetMetric("otelcol_httplogs_receiver.logs.exports_total")
+	require.NoError(t, err)
+	metricdatatest.AssertEqual(t, want, got, opts...)
+}
+
+func AssertEqualHttplogsReceiverLogsFreshness(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[float64], opts ...metricdatatest.Option) {
+	want := metricdata.Metrics{
+		Name:        "otelcol_httplogs_receiver.logs.freshness",
+		Description: "The age in seconds of the newest successfully exported log record at the time it was processed. [Development]",
+		Unit:        "s",
+		Data: metricdata.Gauge[float64]{
+			DataPoints: dps,
+		},
+	}
+	got, err := tt.GetMetric("otelcol_httplogs_receiver.logs.freshness")
+	require.NoError(t, err)
+	metricdatatest.AssertEqual(t, want, got, opts...)
+}
+
+func AssertEqualHttplogsReceiverLogsLinesReadTotal(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
+	want := metricdata.Metrics{
+		Name:        "otelcol_httplogs_receiver.logs.lines_read_total",
+		Description: "The total number of decoded log records read from HTTP requests. [Development]",
+		Unit:        "1",
+		Data: metricdata.Sum[int64]{
+			Temporality: metricdata.CumulativeTemporality,
+			IsMonotonic: true,
+			DataPoints:  dps,
+		},
+	}
+	got, err := tt.GetMetric("otelcol_httplogs_receiver.logs.lines_read_total")
+	require.NoError(t, err)
+	metricdatatest.AssertEqual(t, want, got, opts...)
+}
+
+func AssertEqualHttplogsReceiverLogsLinesSkippedTotal(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
+	want := metricdata.Metrics{
+		Name:        "otelcol_httplogs_receiver.logs.lines_skipped_total",
+		Description: "The total number of log lines skipped because they were already exported by file tracking. [Development]",
+		Unit:        "1",
+		Data: metricdata.Sum[int64]{
+			Temporality: metricdata.CumulativeTemporality,
+			IsMonotonic: true,
+			DataPoints:  dps,
+		},
+	}
+	got, err := tt.GetMetric("otelcol_httplogs_receiver.logs.lines_skipped_total")
+	require.NoError(t, err)
+	metricdatatest.AssertEqual(t, want, got, opts...)
+}
+
+func AssertEqualHttplogsReceiverLogsLinesUnparseableTotal(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
+	want := metricdata.Metrics{
+		Name:        "otelcol_httplogs_receiver.logs.lines_unparseable_total",
+		Description: "The total number of log decode failures. [Development]",
+		Unit:        "1",
+		Data: metricdata.Sum[int64]{
+			Temporality: metricdata.CumulativeTemporality,
+			IsMonotonic: true,
+			DataPoints:  dps,
+		},
+	}
+	got, err := tt.GetMetric("otelcol_httplogs_receiver.logs.lines_unparseable_total")
+	require.NoError(t, err)
+	metricdatatest.AssertEqual(t, want, got, opts...)
+}
+
+func AssertEqualHttplogsReceiverRequestsTotal(t *testing.T, tt *componenttest.Telemetry, dps []metricdata.DataPoint[int64], opts ...metricdatatest.Option) {
+	want := metricdata.Metrics{
+		Name:        "otelcol_httplogs_receiver.requests_total",
+		Description: "The total number of HTTP requests handled by the receiver, by outcome and reason. [Development]",
+		Unit:        "1",
+		Data: metricdata.Sum[int64]{
+			Temporality: metricdata.CumulativeTemporality,
+			IsMonotonic: true,
+			DataPoints:  dps,
+		},
+	}
+	got, err := tt.GetMetric("otelcol_httplogs_receiver.requests_total")
+	require.NoError(t, err)
+	metricdatatest.AssertEqual(t, want, got, opts...)
+}

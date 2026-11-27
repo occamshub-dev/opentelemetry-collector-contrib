@@ -462,6 +462,60 @@ func TestConcurrencyTelemetry(t *testing.T) {
 	require.NoError(t, r.Shutdown(context.Background()))
 }
 
+func TestRequestTelemetry(t *testing.T) {
+	tt := newTestTelemetry(t)
+	set := metadatatest.NewSettings(tt)
+	telemetry, err := metadata.NewTelemetryBuilder(set.TelemetrySettings)
+	require.NoError(t, err)
+	r := &httpLogsReceiver{
+		settings:  set,
+		config:    &Config{AccessKey: testHttpAccessKey},
+		consumer:  newNopHttpLogsConsumer(http.StatusOK, nil),
+		telemetry: telemetry,
+	}
+
+	accepted := httptest.NewRecorder()
+	r.ServeHTTP(accepted, newTestRequest([]byte("accepted")))
+	require.Equal(t, http.StatusOK, accepted.Code)
+
+	rejected := newTestRequest([]byte("rejected"))
+	rejected.Header.Set(headerHttpAccessKey, "wrong")
+	rejectedResponse := httptest.NewRecorder()
+	r.ServeHTTP(rejectedResponse, rejected)
+	require.Equal(t, http.StatusUnauthorized, rejectedResponse.Code)
+
+	unsupported := newTestRequest([]byte("unsupported"))
+	unsupported.Header.Set(headerContentEncoding, "br")
+	unsupportedResponse := httptest.NewRecorder()
+	r.ServeHTTP(unsupportedResponse, unsupported)
+	require.Equal(t, http.StatusBadRequest, unsupportedResponse.Code)
+
+	metadatatest.AssertEqualHttplogsReceiverRequestsTotal(t, tt, []metricdata.DataPoint[int64]{
+		{
+			Attributes: attribute.NewSet(
+				attribute.String("request_reason", "invalid_access_key"),
+				attribute.String("request_state", "rejected"),
+			),
+			Value: 1,
+		},
+		{
+			Attributes: attribute.NewSet(
+				attribute.String("request_reason", "success"),
+				attribute.String("request_state", "accepted"),
+			),
+			Value: 1,
+		},
+		{
+			Attributes: attribute.NewSet(
+				attribute.String("request_reason", "unsupported_content_encoding"),
+				attribute.String("request_state", "rejected"),
+			),
+			Value: 1,
+		},
+	}, metricdatatest.IgnoreTimestamp())
+	require.NoError(t, r.Shutdown(context.Background()))
+}
+
 func TestGetCommonAttributes(t *testing.T) {
 	testCases := map[string]struct {
 		headers map[string]string
